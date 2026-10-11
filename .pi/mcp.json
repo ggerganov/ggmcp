@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ggmcp": {
+      "url": "http://127.0.0.1:8080/mcp",
+      "description": "Demo MCP server written in dependency-free C++"
+    }
+  }
+}

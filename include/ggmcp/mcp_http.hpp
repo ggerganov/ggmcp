@@ -1,0 +1,64 @@
+// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+//
+// SPDX-License-Identifier: MIT
+//
+// mcp_http.hpp - MCP "streamable HTTP" transport on top of HttpServer.
+//
+// Wire rules implemented here (protocol version 2025-06-18):
+//   * POST   <endpoint>  JSON-RPC message in, JSON-RPC message out.
+//                        Notifications get 202 Accepted with an empty body.
+//   * GET    <endpoint>  405 Method Not Allowed - this server sends no
+//                        server-originated messages, which the spec allows.
+//   * DELETE <endpoint>  ends the session.
+//   * OPTIONS<endpoint>  preflight.
+//   * Mcp-Session-Id     issued on initialize, required afterwards; unknown
+//                        ids get 404.
+//   * MCP-Protocol-Version  validated when a client sends it.
+//   * Origin             validated (DNS-rebinding protection).
+
+#ifndef GGGMCP_MCP_HTTP_HPP
+#define GGGMCP_MCP_HTTP_HPP
+
+#include <string>
+#include <vector>
+
+#include "ggmcp/http_server.hpp"
+#include "ggmcp/protocol.hpp"
+
+namespace ggmcp {
+
+struct HttpOptions {
+    std::string endpoint = "/mcp";
+
+    /// Origins to accept in the Origin header, e.g. "http://localhost:3000".
+    /// Empty means "localhost and 127.0.0.1 on the bound port", which is what a
+    /// local dev client sends. A missing Origin (non-browser clients) is always
+    /// accepted.
+    std::vector<std::string> allowed_origins;
+
+    /// Accept any Origin. Only turn this on if a browser will talk to this
+    /// server directly; it removes the DNS-rebinding guard.
+    bool allow_any_origin = false;
+
+    /// Skip Origin validation entirely.
+    bool disable_origin_check = false;
+
+    /// Expose a plain GET /health status endpoint.
+    bool enable_health_endpoint = true;
+
+    /// Expose GET / with a human-readable banner.
+    bool enable_index_endpoint = true;
+};
+
+/// Wraps a Dispatcher in an HTTP request handler.
+HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions options, std::uint16_t bound_port);
+
+/// Convenience overload that uses the default endpoint (/mcp).
+HttpServer::Handler make_http_handler(Dispatcher& dispatcher, std::uint16_t bound_port);
+
+/// True when `origin` is loopback and `port` matches `bound_port`.
+bool origin_is_loopback(const std::string& origin, std::uint16_t bound_port);
+
+}  // namespace ggmcp
+
+#endif  // GGGMCP_MCP_HTTP_HPP

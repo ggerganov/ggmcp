@@ -1,0 +1,18 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+
+# Editor / OS noise
+.compile_commands.json
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+.DS_Store
+
+# Python test caches
+__pycache__/
+*.pyc
