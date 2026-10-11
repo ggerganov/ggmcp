@@ -100,6 +100,7 @@ struct Context {
     std::string peer;            ///< "127.0.0.1:54321" for HTTP, "-" for stdio
     std::string client_name;     ///< from clientInfo
     std::string client_version;
+    std::string auth;            ///< credential source, e.g. "env:GGMCP_TOKEN"; empty if anonymous
 };
 
 struct Tool {

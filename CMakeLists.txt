@@ -19,6 +19,7 @@ add_library(ggmcp_core STATIC
   src/log.cpp
   src/protocol.cpp
   src/http_server.cpp
+  src/auth.cpp
   src/mcp_http.cpp
   src/tools.cpp
   src/filesystem_tools.cpp

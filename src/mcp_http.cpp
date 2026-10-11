@@ -105,6 +105,23 @@ bool origin_is_loopback(const std::string& origin, std::uint16_t bound_port) {
     return end && *end == '\0' && static_cast<std::uint16_t>(parsed) == bound_port;
 }
 
+/// Absolute URL to advertise for the metadata document.
+///
+/// Prefers an explicit operator override, then the Host header (so a deployment
+/// behind a reverse proxy advertises the name the proxy terminates), then the
+/// bound address. A Host header that does not look like a bare authority is
+/// ignored rather than echoed: this string is handed to clients inside a header
+/// they may follow.
+std::string advertised_base(const std::string& public_url, const std::string& host, std::uint16_t bound_port) {
+    if (!public_url.empty()) return public_url;
+
+    const bool looks_like_authority =
+        !host.empty() && host.find_first_of(" /@?#\\\r\n") == std::string::npos;
+    if (looks_like_authority) return "http://" + host;
+
+    return "http://127.0.0.1:" + std::to_string(bound_port);
+}
+
 HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions options, std::uint16_t bound_port) {
     if (options.allowed_origins.empty()) {
         // Nothing configured: accept the loopback names browsers and local
@@ -118,6 +135,65 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
         const std::string endpoint = options.endpoint.empty() ? std::string("/mcp") : options.endpoint;
         const std::string method = lower(request.method);
         const bool is_endpoint = request.path == endpoint || request.path == endpoint + "/";
+        const std::shared_ptr<TokenStore> tokens = options.tokens;
+        const bool auth_required = tokens && tokens->required();
+
+        Identity identity;
+
+        // --- routes that an unauthenticated caller may always reach ---------
+        //
+        // Two, and only two. The metadata document exists precisely to be fetched
+        // before you have a credential. The CORS preflight is exempt because a
+        // browser does not send Authorization on a preflight: answering 401 there
+        // makes the server unreachable from any web page rather than merely
+        // unreadable.
+        if (tokens && !is_endpoint && method == "get" && request.path == tokens->metadata_path()) {
+            Response response = Response::json(200, tokens->metadata_json(
+                                                        advertised_base(tokens->public_url(), request.header("host"),
+                                                                        bound_port) +
+                                                        endpoint));
+            response.set("Cache-Control", "no-store");
+            response.set("X-Content-Type-Options", "nosniff");
+            return response;
+        }
+
+        if (is_endpoint && method == "options") {
+            Response response = Response::empty(204);
+            response.set("Allow", "POST, GET, DELETE, OPTIONS");
+            response.set("Accept", "application/json, text/event-stream");
+            if (options.allow_any_origin) {
+                response.set("Access-Control-Allow-Origin", request.header("origin"));
+                response.set("Access-Control-Allow-Headers",
+                             "Content-Type, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID, Authorization");
+                response.set("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
+                response.set("Access-Control-Max-Age", "600");
+            }
+            return response;
+        }
+
+        // --- everything else needs the credential when one is required -------
+        if (tokens) {
+            const AuthResult auth = tokens->authorize(request);
+            if (!auth.ok) {
+                const std::string metadata_url =
+                    advertised_base(tokens->public_url(), request.header("host"), bound_port) +
+                    tokens->metadata_path();
+                log_debug("401 " + method + " " + request.path + ": " + auth.description);
+
+                Response response = Response::json(401, Value::make_object(Object{
+                                                           {"error", Value::make_string("unauthorized")},
+                                                           {"error_description", Value::make_string(auth.description)},
+                                                           {"resource_metadata", Value::make_string(metadata_url)},
+                                                       })
+                                                       .dump());
+                response.set("WWW-Authenticate", tokens->www_authenticate(metadata_url, auth.oauth_error,
+                                                                         auth.description));
+                response.set("Cache-Control", "no-store");
+                response.set("X-Content-Type-Options", "nosniff");
+                return response;
+            }
+            identity = auth.identity;
+        }
 
         // --- non-MCP conveniences -----------------------------------------
         if (!is_endpoint && options.enable_health_endpoint && request.path == "/health" && method == "get") {
@@ -138,6 +214,9 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
             status["tools"] = Value::make_array(std::move(tools));
             status["sessions"] = Value::make_int(static_cast<std::int64_t>(dispatcher.session_count()));
             status["sessionPolicy"] = Value::make_string(to_string(dispatcher.session_policy()));
+            // Which tools exist is configuration, and configuration is worth
+            // protecting: with auth on, /health is behind the token too.
+            status["authorization"] = Value::make_string(auth_required ? "bearer" : "anonymous");
 
             return Response::json(200, Value::make_object(std::move(status)).dump());
         }
@@ -167,6 +246,11 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
                     banner += "served against an implicit session.\n";
                     break;
             }
+            if (auth_required) {
+                banner += "\nAuthorization is required: send 'Authorization: Bearer <token>' on every\n";
+                banner += "request, including this one. A missing or unusable token gets 401 with a\n";
+                banner += "WWW-Authenticate header pointing at " + tokens->metadata_path() + ".\n";
+            }
             return Response::text(200, std::move(banner));
         }
 
@@ -181,19 +265,6 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
 
         // --- endpoint routing ---------------------------------------------
         const std::string allowed = "POST, GET, DELETE, OPTIONS";
-
-        if (method == "options") {
-            Response response = Response::empty(204);
-            response.set("Allow", allowed);
-            response.set("Accept", "application/json, text/event-stream");
-            if (options.allow_any_origin) {
-                response.set("Access-Control-Allow-Origin", request.header("origin"));
-                response.set("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID, Authorization");
-                response.set("Access-Control-Allow-Methods", allowed);
-                response.set("Access-Control-Max-Age", "600");
-            }
-            return response;
-        }
 
         if (method == "get") {
             // The spec permits 405 here for servers that do not push
@@ -268,6 +339,8 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
         ctx.transport = "http";
         ctx.peer = request.peer;
         ctx.session_id = request.header("mcp-session-id");
+        // Which credential opened this call, never the credential itself.
+        ctx.auth = identity.describe();
 
         Reply reply = dispatcher.handle(request.body, std::move(ctx));
 

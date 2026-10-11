@@ -140,9 +140,9 @@ void register_demo_tools(Dispatcher& dispatcher) {
     {
         Tool tool;
         tool.name = "whoami";
-        tool.description = "Describes the current MCP session: transport, session id, peer address "
-                           "and the clientInfo the caller sent during initialize. Handy for "
-                           "debugging a client connection.";
+        tool.description = "Describes the current MCP session: transport, session id, peer address, "
+                           "credential source and the clientInfo the caller sent during initialize. "
+                           "Handy for debugging a client connection.";
         tool.input_schema = schema::object({}, {});
         tool.annotations = tool_annotations("Describe this session", /*read_only=*/true, /*destructive=*/false,
                                       /*idempotent=*/true);
@@ -154,6 +154,11 @@ void register_demo_tools(Dispatcher& dispatcher) {
             payload["sessionId"] = Value::make_string(ctx.session_id.empty() ? std::string("(implicit)")
                                                                               : ctx.session_id);
             payload["peer"] = Value::make_string(ctx.peer);
+            // Which credential source authenticated this call ("env:GGMCP_TOKEN",
+            // "tokens.txt:2", or "anonymous"). The secret itself is never in reach
+            // of a tool, so it cannot be echoed back to the caller that presented it.
+            payload["authorization"] = Value::make_string(ctx.auth.empty() ? std::string("anonymous")
+                                                                           : ctx.auth);
             payload["clientName"] = Value::make_string(ctx.client_name);
             payload["clientVersion"] = Value::make_string(ctx.client_version);
             payload["server"] = Value::make_string(std::string(kDefaultServerName) + "/" +

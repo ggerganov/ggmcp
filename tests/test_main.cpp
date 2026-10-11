@@ -9,10 +9,12 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "ggmcp/auth.hpp"
 #include "ggmcp/json.hpp"
 #include "ggmcp/mcp_http.hpp"
 #include "ggmcp/protocol.hpp"
@@ -591,6 +593,283 @@ ToolCall call_tool(ggmcp::Dispatcher& dispatcher, const std::string& session, co
     return call;
 }
 
+// ---------------------------------------------------------------------------
+// Authorization
+// ---------------------------------------------------------------------------
+
+/// Builds a Request the way the HTTP parser would, so the auth checks can be
+/// driven without a socket.
+ggmcp::Request auth_request(const std::string& target, const std::string& authorization,
+                            const std::string& method = "POST") {
+    ggmcp::Request request;
+    request.method = method;
+    request.target = target;
+    const std::size_t question = target.find('?');
+    request.path = question == std::string::npos ? target : target.substr(0, question);
+    request.query = question == std::string::npos ? std::string() : target.substr(question + 1);
+    request.version = "HTTP/1.1";
+    request.peer = "127.0.0.1:43111";
+    request.body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}";
+    request.headers["content-type"] = "application/json";
+    request.headers["accept"] = "application/json";
+    if (!authorization.empty()) request.headers["authorization"] = authorization;
+    return request;
+}
+
+std::string response_header(const ggmcp::Response& response, const std::string& name) {
+    for (const auto& header : response.headers) {
+        std::string key = header.first;
+        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (key == name) return header.second;
+    }
+    return {};
+}
+
+void write_tokens(const std::filesystem::path& path, const std::string& contents) {
+    std::ofstream stream(path, std::ios::binary);
+    stream << contents;
+}
+
+void test_constant_time_equals() {
+    group("auth/constant-time");
+
+    // These pin the *behaviour*; they cannot pin the timing, which is the whole
+    // point. A short-circuiting `a == b` passes every assertion here and still
+    // hands a caller the secret one byte at a time - which is why the loop below
+    // exists at all, and why it must not be "simplified" back into an ==.
+    check(ggmcp::constant_time_equals("", ""), "two empty strings match");
+    check(ggmcp::constant_time_equals("token-value", "token-value"), "equal secrets match");
+    check(!ggmcp::constant_time_equals("token-value", "token-valuE"), "one byte at the end differs");
+    check(!ggmcp::constant_time_equals("token-value", "Token-value"), "one byte at the start differs");
+    check(!ggmcp::constant_time_equals("token", "token-value"), "a prefix does not match");
+    check(!ggmcp::constant_time_equals("token-value", "token"), "a longer secret does not match");
+    check(!ggmcp::constant_time_equals("token-value", ""), "the empty string matches nothing real");
+
+    std::string long_secret(4096, 'x');
+    std::string differs_at_the_end = long_secret;
+    differs_at_the_end.back() = 'y';
+    check(!ggmcp::constant_time_equals(long_secret, differs_at_the_end), "a long secret differs in its last byte");
+    differs_at_the_end.back() = 'x';
+    check(ggmcp::constant_time_equals(long_secret, differs_at_the_end), "and matches once the byte is put back");
+}
+
+void test_token_store() {
+    group("auth/tokens");
+
+    ScratchSpace scratch("ggmcp-auth");
+    const std::string secret = "unit-test-token-aaaaaaaa";
+    const std::string other = "unit-test-token-bbbbbbbb";
+    const std::filesystem::path tokens = scratch.root / "tokens.txt";
+    std::string error;
+
+    // --- loading ---------------------------------------------------------
+    ggmcp::AuthOptions literal;
+    literal.required = true;
+    literal.token_literal = secret;
+    ggmcp::TokenStore store;
+    check(ggmcp::TokenStore::prepare(literal, store, error), "a handed-over token is accepted");
+    check(store.required(), "the store knows it is enforcing");
+    check_eq(std::to_string(store.size()), "1", "one token loaded");
+    check_eq(store.labels().empty() ? "?" : store.labels()[0], "stdin", "the source is labelled, not quoted");
+
+    ggmcp::AuthOptions off;
+    ggmcp::TokenStore open_store;
+    check(ggmcp::TokenStore::prepare(off, open_store, error), "an unrequired store prepares");
+    check(!open_store.required(), "and reports itself unrequired");
+    check_eq(std::to_string(open_store.size()), "0", "with nothing to check against");
+    check(open_store.authorize(auth_request("/mcp", "")).ok, "and lets anonymous traffic through");
+
+    // An empty file is not "no tokens configured", it is a mistake, and the
+    // operator should hear about it at startup rather than at the door.
+    write_tokens(tokens, "# nothing but a comment\n\n");
+    ggmcp::AuthOptions empty_file;
+    empty_file.required = true;
+    empty_file.token_files = {tokens.string()};
+    ggmcp::TokenStore empty_store;
+    check(!ggmcp::TokenStore::prepare(empty_file, empty_store, error), "a file with no tokens fails to load");
+    check_has(error, "contains no tokens", "and says so");
+
+    write_tokens(tokens, "missing-file-is-not-created\n");
+    std::filesystem::remove(tokens);
+    ggmcp::AuthOptions missing;
+    missing.required = true;
+    missing.token_files = {tokens.string()};
+    ggmcp::TokenStore missing_store;
+    check(!ggmcp::TokenStore::prepare(missing, missing_store, error), "a missing file fails to load");
+    check_has(error, "could not be opened", "and says so");
+
+    // $GGMCP_TOKEN is the default source; naming any other source must not also
+    // silently demand it.
+    // A comment line, a blank line, then two tokens: lines 3 and 4.
+    write_tokens(tokens, "# one token per line\n\n" + secret + "\n" + other + "\n");
+    ggmcp::TokenStore file_store;
+    ggmcp::AuthOptions file_only;
+    file_only.required = true;
+    file_only.token_files = {tokens.string()};
+    check(ggmcp::TokenStore::prepare(file_only, file_store, error),
+          "a file-only configuration does not also require $GGMCP_TOKEN");
+    check_eq(std::to_string(file_store.size()), "2", "one token per line, comments and blanks skipped");
+
+    // --- the check -------------------------------------------------------
+    const ggmcp::AuthResult anonymous = file_store.authorize(auth_request("/mcp", ""));
+    check(!anonymous.ok, "no credential is turned away");
+    check_eq(anonymous.oauth_error, "invalid_request", "a missing credential is invalid_request");
+    check(!contains(anonymous.description, secret), "the refusal names no real token");
+
+    const ggmcp::AuthResult foreign_scheme = file_store.authorize(auth_request("/mcp", "Basic Zm9vOmJhcg=="));
+    check(!foreign_scheme.ok, "a foreign scheme is turned away");
+    check_has(foreign_scheme.description, "Bearer", "and the refusal names the scheme it wants");
+
+    const ggmcp::AuthResult wrong = file_store.authorize(auth_request("/mcp", "Bearer nope-not-it"));
+    check(!wrong.ok, "a wrong token is turned away");
+    check_eq(wrong.oauth_error, "invalid_token", "a wrong token is invalid_token");
+    check(!contains(wrong.description, "nope-not-it"), "and the token is not echoed back");
+
+    const ggmcp::AuthResult right = file_store.authorize(auth_request("/mcp", "Bearer " + secret));
+    check(right.ok, "the right token is let in");
+    check(!right.identity.anonymous, "and the caller stops being anonymous");
+    check_has(right.identity.describe(), "tokens.txt:3", "with a label naming the source line");
+    check(!contains(right.identity.describe(), secret), "the label is a source, not the secret");
+
+    check(file_store.authorize(auth_request("/mcp", "bearer " + secret)).ok,
+          "the scheme name is matched case-insensitively");
+    check(file_store.authorize(auth_request("/mcp", "Bearer   " + secret + "  ")).ok,
+          "surrounding spaces are tolerated");
+    check(!file_store.authorize(auth_request("/mcp", "Bearer ")).ok, "a scheme with no token is refused");
+
+    // --- no side door through the URL ------------------------------------
+    for (const char* name : {"access_token", "token", "bearer", "id_token", "api_key", "apiKey", "key",
+                             "secret", "client_secret", "authorization"}) {
+        const std::string target = std::string("/mcp?") + name + "=" + secret;
+        const ggmcp::AuthResult smuggled = file_store.authorize(auth_request(target, "Bearer " + secret));
+        check(!smuggled.ok, std::string("a valid bearer token does not license ?") + name + "= in the URL");
+        check_has(smuggled.description, "query string", "and the refusal explains why");
+    }
+    check(file_store.authorize(auth_request("/mcp?cursor=abc&limit=10", "Bearer " + secret)).ok,
+          "an ordinary query parameter is not a credential");
+
+    // --- rotation --------------------------------------------------------
+    write_tokens(tokens, other + "\n");
+    check_eq(std::to_string(file_store.size()), "1", "the store notices the file changed");
+    check(!file_store.authorize(auth_request("/mcp", "Bearer " + secret)).ok, "the revoked token stops working");
+    check(file_store.authorize(auth_request("/mcp", "Bearer " + other)).ok, "the new token works with no restart");
+
+    std::filesystem::remove(tokens);
+    check(file_store.authorize(auth_request("/mcp", "Bearer " + other)).ok,
+          "a vanished token file keeps the tokens it last held rather than locking everyone out");
+
+    // --- the documents an unauthenticated client sees --------------------
+    const std::string metadata = file_store.metadata_json("http://127.0.0.1:8080/mcp");
+    check_has(metadata, "\"resource\":\"http://127.0.0.1:8080/mcp\"", "the metadata names the resource");
+    check_has(metadata, "bearer_methods_supported", "and the bearer methods");
+    check(!contains(metadata, "authorization_servers"), "and advertises no authorization server by default");
+    check(!contains(metadata, secret) && !contains(metadata, other), "the metadata carries no secrets");
+
+    const std::string challenge = file_store.www_authenticate("http://h/.well-known/x", "invalid_token", "nope");
+    check_has(challenge, "Bearer realm=\"ggmcp\"", "the challenge names the scheme and realm");
+    check_has(challenge, "error=\"invalid_token\"", "the challenge carries the error code");
+    check_has(challenge, "resource_metadata=\"http://h/.well-known/x\"", "and the metadata URL");
+
+    ggmcp::AuthOptions hostile;
+    hostile.required = true;
+    hostile.token_literal = secret;
+    hostile.realm = "evil\", error=\"injected";
+    hostile.public_url = "https://proxy.example/base/";
+    ggmcp::TokenStore hostile_store;
+    check(ggmcp::TokenStore::prepare(hostile, hostile_store, error), "a hostile realm still loads");
+    check_eq(hostile_store.public_url(), "https://proxy.example/base", "the public URL loses its trailing slash");
+    const std::string escaped = hostile_store.www_authenticate("/.well-known/x", "invalid_request", "d");
+    check(!contains(escaped, "error=\"injected\""), "a quote in the realm cannot inject a parameter");
+    check_has(escaped, "\\\"", "and is escaped instead");
+
+    ggmcp::AuthOptions with_as;
+    with_as.required = true;
+    with_as.token_literal = secret;
+    with_as.authorization_servers = {"https://auth.example"};
+    ggmcp::TokenStore as_store;
+    check(ggmcp::TokenStore::prepare(with_as, as_store, error), "an authorization server can be named");
+    check_has(as_store.metadata_json("http://h/mcp"), "https://auth.example", "and is advertised verbatim");
+    check(as_store.authorize(auth_request("/mcp", "Bearer " + secret)).ok,
+          "naming one does not change what this server accepts");
+}
+
+void test_authorization_handler() {
+    group("auth/handler");
+
+    const std::string secret = "handler-test-token-aaa";
+    std::string error;
+    ggmcp::AuthOptions auth;
+    auth.required = true;
+    auth.token_literal = secret;
+
+    auto store = std::make_shared<ggmcp::TokenStore>();
+    check(ggmcp::TokenStore::prepare(auth, *store, error), "the handler's store prepares");
+
+    ggmcp::Dispatcher dispatcher("test-server", "1");
+    ggmcp::register_demo_tools(dispatcher);
+
+    ggmcp::HttpOptions http;
+    http.tokens = store;
+    const ggmcp::HttpServer::Handler handler = ggmcp::make_http_handler(dispatcher, http, 8080);
+
+    const ggmcp::Response anonymous = handler(auth_request("/mcp", ""));
+    check_eq(std::to_string(anonymous.status), "401", "the handler refuses an anonymous call");
+    check_has(response_header(anonymous, "www-authenticate"), "resource_metadata=", "and points at the metadata");
+    check_has(response_header(anonymous, "www-authenticate"), "invalid_request", "with the RFC 6750 error code");
+    check_eq(response_header(anonymous, "cache-control"), "no-store", "a 401 is not cacheable");
+    check_eq(response_header(anonymous, "x-content-type-options"), "nosniff", "and is not sniffable");
+    check(!contains(anonymous.body, secret), "the 401 body carries no secrets");
+
+    const ggmcp::Response served = handler(auth_request("/mcp", "Bearer " + secret));
+    check_eq(std::to_string(served.status), "200", "a valid token is served");
+    check_has(served.body, "\"tools\"", "with the tool list");
+
+    // The only two exemptions, and why each is one.
+    const ggmcp::Response preflight = handler(auth_request("/mcp", "", "OPTIONS"));
+    check_eq(std::to_string(preflight.status), "204", "the CORS preflight needs no credential");
+    const ggmcp::Response metadata =
+        handler(auth_request("/.well-known/oauth-protected-resource", "", "GET"));
+    check_eq(std::to_string(metadata.status), "200", "the metadata document needs none either");
+    check_has(metadata.body, "\"resource\":\"http://127.0.0.1:8080/mcp\"", "and names the bound resource");
+
+    // Which tools exist is configuration, so both convenience routes are gated.
+    check_eq(std::to_string(handler(auth_request("/health", "", "GET")).status), "401", "/health is gated");
+    check_eq(std::to_string(handler(auth_request("/", "", "GET")).status), "401", "the index is gated");
+    const ggmcp::Response health = handler(auth_request("/health", "Bearer " + secret, "GET"));
+    check_has(health.body, "\"authorization\":\"bearer\"", "health reports the mode");
+    check_has(handler(auth_request("/", "Bearer " + secret, "GET")).body, "Authorization is required",
+              "the index tells callers what to send");
+
+    // What gets advertised as the resource: the Host header when a proxy put one
+    // there, the bound address otherwise, and a Host header that is not a bare
+    // authority never at all - it lands in a header a client may follow.
+    ggmcp::Request proxied = auth_request("/mcp", "Bearer " + secret, "GET");
+    proxied.headers["host"] = "mcp.example.test:8443";
+    check_eq(std::to_string(handler(proxied).status), "405", "GET on the endpoint is 405 with a valid token");
+
+    ggmcp::Request with_host = auth_request("/mcp", "");
+    with_host.headers["host"] = "mcp.example.test:8443";
+    check_has(response_header(handler(with_host), "www-authenticate"), "http://mcp.example.test:8443/",
+              "a Host header becomes the advertised resource");
+
+    ggmcp::Request evil_host = auth_request("/mcp", "");
+    evil_host.headers["host"] = "evil.example/redirect";
+    check(!contains(response_header(handler(evil_host), "www-authenticate"), "evil.example"),
+          "a Host header that is not a bare authority is not echoed");
+    check_has(response_header(handler(evil_host), "www-authenticate"), "http://127.0.0.1:8080/",
+              "and it falls back to the bound address");
+
+    // With no store configured the wire is exactly what it was before this option.
+    ggmcp::HttpOptions open;
+    const ggmcp::HttpServer::Handler open_handler = ggmcp::make_http_handler(dispatcher, open, 8080);
+    check_eq(std::to_string(open_handler(auth_request("/mcp", "")).status), "200", "no store means no gate");
+    check_eq(std::to_string(open_handler(auth_request("/health", "", "GET")).status), "200",
+             "and health stays public");
+    check_eq(std::to_string(open_handler(auth_request("/.well-known/oauth-protected-resource", "", "GET")).status),
+             "404", "and no metadata document is served by an open server");
+    check_has(open_handler(auth_request("/health", "", "GET")).body, "\"anonymous\"", "health says anonymous");
+}
+
 void test_path_confinement() {
     group("tools/confinement");
 
@@ -819,6 +1098,10 @@ int main() {
     test_session_policies();
     test_stdio_skips_session_checks();
     test_origins();
+
+    test_constant_time_equals();
+    test_token_store();
+    test_authorization_handler();
 
     test_path_confinement();
     test_filesystem_tools();

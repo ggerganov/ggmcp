@@ -19,9 +19,11 @@
 #ifndef GGGMCP_MCP_HTTP_HPP
 #define GGGMCP_MCP_HTTP_HPP
 
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "ggmcp/auth.hpp"
 #include "ggmcp/http_server.hpp"
 #include "ggmcp/protocol.hpp"
 
@@ -29,6 +31,15 @@ namespace ggmcp {
 
 struct HttpOptions {
     std::string endpoint = "/mcp";
+
+    /// Bearer-token authorization, prepared with TokenStore::prepare() before the
+    /// handler is built - a server that demands a token it was never given should
+    /// fail at startup, not on the first request. Null (the default) means the
+    /// server stays open on the wire, as it was before this option existed.
+    ///
+    /// The handler is shared by every connection thread, hence the shared_ptr:
+    /// TokenStore owns a mutex and is neither copyable nor movable.
+    std::shared_ptr<TokenStore> tokens;
 
     /// Origins to accept in the Origin header, e.g. "http://localhost:3000".
     /// Empty means "localhost and 127.0.0.1 on the bound port", which is what a

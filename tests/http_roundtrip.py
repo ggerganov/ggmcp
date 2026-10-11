@@ -50,10 +50,11 @@ class Server:
     silent deadlock: whichever one loses the race blocks in readline() forever.
     """
 
-    def __init__(self, binary, extra_args=()):
+    def __init__(self, binary, extra_args=(), env=None):
         self.binary = binary
         self.log = []
         self.args = [binary, *extra_args]
+        self.env = env
         self._lines = threading.Condition()
         self._reader = None
         self.process = None
@@ -65,6 +66,7 @@ class Server:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            env=self.env,
         )
         if self.process.poll() is not None:
             raise RuntimeError(f"server exited immediately: {self.process.stderr.read()!r}")
@@ -275,11 +277,11 @@ def test_tools_list(host, port, path, session):
         check(isinstance(schema.get("required"), list), f'{tool["name"]} schema required list')
 
 
-def call_tool(host, port, path, session, name, arguments, request_id=5):
+def call_tool(host, port, path, session, name, arguments, request_id=5, headers=None):
     """MCP puts the tool name and its arguments under `params`, not at top level."""
     body = {"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
             "params": {"name": name, "arguments": arguments if arguments is not None else {}}}
-    return post(host, port, path, body, session=session)
+    return post(host, port, path, body, headers=headers, session=session)
 
 
 def test_tool_calls(host, port, path, session):
@@ -770,6 +772,241 @@ def test_stdio(binary):
     check_eq(process.wait(timeout=10), 0, "stdio exits 0 on EOF")
 
 
+def initialize_with_token(host, port, path, headers, client_name="pytest"):
+    return post(
+        host, port, path,
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": LATEST, "clientInfo": {"name": client_name, "version": "1"},
+                    "capabilities": {}}},
+        headers=headers)
+
+
+def run_command(binary, args, env=None, stdin=None):
+    """Runs the binary to completion; returns (returncode, stdout, stderr)."""
+    process = subprocess.run([binary, *args], capture_output=True, text=True, timeout=10, env=env,
+                             input=stdin)
+    return process.returncode, process.stdout, process.stderr
+
+
+def test_authorization(binary):
+    """Bearer-token authorization: the 401 handshake, token sources, rotation."""
+    print("\n== authorization ==")
+    good = "wire-test-token-aaaaaaaaaaaa"
+    bad = "wire-test-token-zzzzzzzzzzzz"
+    metadata_path = "/.well-known/oauth-protected-resource"
+
+    with tempfile.TemporaryDirectory(prefix="ggmcp-auth-") as root:
+        token_file = os.path.join(root, "tokens.txt")
+        with open(token_file, "w") as handle:
+            handle.write(f"# one token per line, comments start with #\n\n{good}\n")
+
+        with Server(binary, ["--http", "127.0.0.1:0", "--require-token", "--token-file", token_file]) as server:
+            host, port, path = server.wait_for_port()
+            bearer = {"Authorization": f"Bearer {good}"}
+            tools_list = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+
+            check_has(server.wait_for_log(r"authorization required").group(0), "authorization required",
+                      "the banner says authorization is required")
+            check_has(server.wait_for_log(r"unauthenticated requests get 401").group(0),
+                      "unauthenticated requests get 401", "the banner names the consequence")
+
+            # --- the 401 handshake -------------------------------------------
+            status, headers, body = post(host, port, path, tools_list)
+            check_eq(status, 401, "a request with no credential is refused")
+            challenge = headers.get("www-authenticate", "")
+            check_has(challenge, "Bearer realm=", "the challenge offers the Bearer scheme")
+            check_has(challenge, 'error="invalid_request"', "a missing credential is invalid_request")
+            check_has(challenge, "resource_metadata=", "the challenge points at the metadata document")
+            check_has(challenge, metadata_path, "the challenge points at the right document")
+            check_eq(headers.get("cache-control"), "no-store", "a 401 is not cacheable")
+            check_eq(headers.get("x-content-type-options"), "nosniff", "a 401 says nosniff")
+            check(isinstance(body, dict) and "error_description" in str(body), "the 401 body explains itself")
+
+            status, headers, body = post(host, port, path, tools_list, headers={"Authorization": f"Bearer {bad}"})
+            check_eq(status, 401, "a wrong token is refused")
+            check_has(headers.get("www-authenticate", ""), 'error="invalid_token"',
+                      "a wrong token is invalid_token, not invalid_request")
+            check(bad not in json.dumps(body) and good not in json.dumps(body),
+                  "the refusal echoes neither the tried token nor a real one")
+
+            status, headers, _ = post(host, port, path, tools_list, headers={"Authorization": "Basic Zm9vOmJhcg=="})
+            check_eq(status, 401, "another auth scheme is refused")
+            check_has(headers.get("www-authenticate", ""), "Bearer", "the refusal names the scheme it wants")
+
+            status, headers, _ = post(host, port, path, tools_list, headers={"Authorization": f"bearer {good}"})
+            check_eq(status, 200, "the Bearer scheme is matched case-insensitively")
+
+            # --- a good token works everywhere a bad one fails ----------------
+            status, _, body = post(host, port, path, tools_list, headers=bearer)
+            check_eq(status, 200, "a valid token is accepted")
+            check_eq(len(body["result"]["tools"]), 4, "a valid token sees the tools")
+
+            status, headers, _ = initialize(host, port, path)
+            check_eq(status, 401, "initialize without a token is refused")
+            status, headers, _ = initialize_with_token(host, port, path, bearer)
+            check_eq(status, 200, "initialize with a token is accepted")
+            check(headers.get("mcp-session-id", "") != "", "initialize with a token still issues a session id")
+
+            # --- /health, / and the metadata document ------------------------
+            status, _, _ = get_json(host, port, "/health")
+            check_eq(status, 401, "/health is behind the token too: which tools exist is configuration")
+            status, _, health = request_raw("GET", host, port, "/health", headers=bearer)
+            check_eq(status, 200, "/health with a token is served")
+            check_has(json.loads(health).get("authorization", ""), "bearer", "health reports bearer auth")
+
+            status, _, index = get_text(host, port, "/")
+            check_eq(status, 401, "the index page is behind the token")
+
+            status, _, index = request_raw("GET", host, port, "/", headers=bearer)
+            check_eq(status, 200, "the index page with a token is served")
+            check_has(index.decode(), "Authorization is required", "the index tells callers to send a token")
+
+            # The metadata document is the one thing an unauthenticated client
+            # must be able to read - that is what it is for.
+            status, _, document = get_json(host, port, metadata_path)
+            check_eq(status, 200, "the metadata document needs no token")
+            check(document.get("resource", "").endswith(path), "the metadata names this resource")
+            check("header" in document.get("bearer_methods_supported", []), "the metadata advertises header bearer")
+            check("authorization_servers" not in document,
+                  "no authorization server is advertised when none was configured")
+
+            # --- no back door through the query string -----------------------
+            status, _, body = post(host, port, f"{path}?access_token={good}", tools_list, headers=bearer)
+            check_eq(status, 401, "a valid bearer token does not license a query-string credential")
+            check_has(json.dumps(body), "query string", "the refusal says why")
+
+            for name in ("token", "apiKey", "key", "id_token"):
+                status, _, _ = post(host, port, f"{path}?{name}={good}", tools_list, headers=bearer)
+                check_eq(status, 401, f"?{name}= is refused as a credential channel")
+
+            status, _, _ = post(host, port, f"{path}?name=hello", tools_list, headers=bearer)
+            check_eq(status, 200, "an ordinary query parameter is not a credential")
+
+            # --- whoami reports the source, never the secret -----------------
+            status, headers, _ = initialize(host, port, path)
+            session = headers.get("mcp-session-id")
+            check_eq(status, 401, "initialize without a token gets no session")
+            status, headers, _ = initialize_with_token(host, port, path, bearer)
+            session = headers.get("mcp-session-id", session)
+            status, _, body = call_tool(host, port, path, session, "whoami", {}, request_id=2, headers=bearer)
+            text = json.dumps(body.get("result", {}))
+            # The token sits on line 3 of the file: a comment and a blank line precede it.
+            check_has(text, "tokens.txt:3", "whoami names the credential source")
+            check(good not in text, "whoami never repeats the credential it was given")
+
+            # --- rotation: rewrite the file, no restart ----------------------
+            # The file is only re-read on the way past the door, so the request
+            # after the rewrite is what notices.
+            with open(token_file, "w") as handle:
+                handle.write(f"{bad}\n")
+            status, _, _ = post(host, port, path, tools_list, headers=bearer)
+            check_eq(status, 401, "the old token stops working once the file changes")
+            check_has(server.wait_for_log(r"reloaded").group(0), "reloaded", "the rotation is logged")
+            status, _, _ = post(host, port, path, tools_list, headers={"Authorization": f"Bearer {bad}"})
+            check_eq(status, 200, "the new token works without a restart")
+
+        # --- two tokens, both honoured ------------------------------------
+        two_tokens = os.path.join(root, "two.txt")
+        with open(two_tokens, "w") as handle:
+            handle.write(f"{good}\n{bad}\n")
+        with Server(binary, ["--http", "127.0.0.1:0", "--require-token", "--token-file", two_tokens]) as server:
+            host, port, path = server.wait_for_port()
+            for token in (good, bad):
+                status, _, _ = post(host, port, path, tools_list, headers={"Authorization": f"Bearer {token}"})
+                check_eq(status, 200, f"each configured token works ({token[:6]}...)")
+
+        # --- --public-url: what a reverse-proxy deployment advertises ------
+        with Server(binary, ["--http", "127.0.0.1:0", "--require-token", "--token-file", two_tokens,
+                             "--public-url", "https://proxy.example/mcp/"]) as server:
+            host, port, path = server.wait_for_port()
+            status, headers, _ = post(host, port, path, tools_list)
+            check_eq(status, 401, "the proxied server still refuses anonymous calls")
+            check_has(headers.get("www-authenticate", ""), 'resource_metadata="https://proxy.example/mcp' + metadata_path,
+                      "the challenge advertises the public base URL, not the bound one")
+            _, _, document = get_json(host, port, metadata_path)
+            check_eq(document.get("resource"), "https://proxy.example/mcp" + path,
+                     "the metadata document advertises the public base URL")
+
+        # --- --authorization-server is advertised, and nothing more --------
+        with Server(binary, ["--http", "127.0.0.1:0", "--require-token", "--token-file", two_tokens,
+                             "--authorization-server", "https://auth.example"]) as server:
+            host, port, path = server.wait_for_port()
+            _, _, document = get_json(host, port, metadata_path)
+            check_eq(document.get("authorization_servers"), ["https://auth.example"],
+                     "a configured authorization server is advertised")
+            status, _, _ = post(host, port, path, tools_list, headers={"Authorization": f"Bearer {good}"})
+            check_eq(status, 200, "advertising an authorization server does not change the check")
+
+        # --- --token-stdin: a secret that never touched argv ---------------
+        reader, writer = os.pipe()
+        os.write(writer, (good + "\n").encode())
+        os.close(writer)
+        process = subprocess.Popen([binary, "--http", "127.0.0.1:0", "--require-token", "--token-stdin"],
+                                   stdin=reader, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        os.close(reader)
+        try:
+            deadline = time.time() + 10
+            port = 0
+            while time.time() < deadline and port == 0:
+                line = process.stderr.readline().decode().strip()
+                if not line:
+                    break
+                if "listening on" in line:
+                    port = int(line.rsplit(":", 1)[1].split("/")[0])
+            check(port > 0, "--token-stdin starts the server")
+            if port:
+                status, _, _ = post("127.0.0.1", port, "/mcp", tools_list, headers=bearer)
+                check_eq(status, 200, "the token read from stdin is the one that works")
+                status, _, _ = post("127.0.0.1", port, "/mcp", tools_list)
+                check_eq(status, 401, "and it is still required")
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+        # --- misconfigurations must fail at startup ------------------------
+        bare_env = {k: v for k, v in os.environ.items() if k != "GGMCP_TOKEN"}
+        cases = [
+            (["--require-token"], bare_env, None, "GGMCP_TOKEN"),
+            (["--require-token", "--token-env", "GGMCP_NOT_SET"], None, None, "GGMCP_NOT_SET"),
+            (["--require-token", "--token-file", os.path.join(root, "missing.txt")], None, None,
+             "could not be opened"),
+            (["--require-token", "--token-file", os.path.join(root, "empty.txt")], None, None,
+             "contains no tokens"),
+            (["--token-file", token_file], None, None, "--require-token"),
+            (["--public-url", "https://x.example"], None, None, "--require-token"),
+            (["--authorization-server", "https://auth.example"], None, None, "--require-token"),
+            (["--stdio", "--token-stdin"], None, "\n", "--stdio"),
+            (["--require-token", "--token-stdin"], None, "", "stdin is empty"),
+        ]
+        with open(os.path.join(root, "empty.txt"), "w") as handle:
+            handle.write("# nothing here but a comment\n")
+
+        for args, env, stdin, want in cases:
+            code, _, err = run_command(binary, args, env=env, stdin=stdin)
+            check_eq(code, 2, f"{' '.join(args)} exits 2")
+            check_has(err, want, f"the error for {' '.join(args)} mentions {want!r}")
+
+        # A short token is not fatal, but it must be said out loud.
+        with Server(binary, ["--http", "127.0.0.1:0", "--require-token", "--token-env", "GGMCP_SHORT"],
+                    env=dict(os.environ, GGMCP_SHORT="abc")) as server:
+            host, port, path = server.wait_for_port()
+            check_has(server.wait_for_log(r"character token").group(0), "character token",
+                      "a short token is warned about")
+            status, _, _ = post(host, port, path, tools_list, headers=bearer)
+            check_eq(status, 401, "a short token is still a real check")
+
+        # The default server keeps answering anonymous callers: turning this
+        # feature on is what changes the wire, not its mere existence.
+        with Server(binary, ["--http", "127.0.0.1:0"], env=bare_env) as server:
+            host, port, path = server.wait_for_port()
+            status, _, _ = post(host, port, path, tools_list)
+            check_eq(status, 200, "without --require-token anonymous calls still work")
+            _, _, health = get_json(host, port, "/health")
+            check_eq(health.get("authorization"), "anonymous", "health reports anonymous auth by default")
+            _, _, document = get_json(host, port, metadata_path)
+            check_eq(document.get("resource"), None, "the metadata document is not served when auth is off")
+
+
 def main():
     # Turn a future hang into a loud failure with a traceback instead of an
     # infinitely spinning test run.
@@ -807,6 +1044,7 @@ def main():
     test_flag_validation(binary)
     test_filesystem_tools(binary)
     test_tools_off_by_default(binary)
+    test_authorization(binary)
     test_stdio(binary)
 
     signal.alarm(0)  # cancel the watchdog
