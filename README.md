@@ -5,12 +5,13 @@ C++17, served over **streamable HTTP**. No nlohmann/json, no cpp-httplib, no Boo
 just the standard library and POSIX sockets.
 
 Verified against a real MCP client: `pi mcp list` reports
-`ggmcp: connected, 4 tools` against this binary.
+`ggmcp: connected, 4 tools` against this binary — or 8 with the file and shell tools
+switched on.
 
 ```
 $ make && make test
 ...
-100% tests passed out of 2          # 152 in-process checks + 137 live wire checks
+100% tests passed out of 2          # 227 in-process checks + 224 live wire checks
 ```
 
 ## Why C++ is a reasonable choice here
@@ -26,6 +27,7 @@ server needs is small:
 | HTTP/1.1 server | `src/http_server.cpp`, ~530 lines | what "must be HTTP" costs you |
 | MCP dispatch | `src/protocol.cpp`, ~420 lines | 5 methods + session state |
 | HTTP transport glue | `src/mcp_http.hpp` | headers, Origin, status mapping |
+| File + shell tools | `src/filesystem_tools.cpp`, ~790 lines | not protocol at all: confinement, atomic writes, a shell with a timeout and a process group |
 
 So the honest answer: **feasible and pleasant, at the cost of owning a JSON parser and a
 small HTTP server.** If your MCP server is a thin wrapper over something already in
@@ -48,6 +50,8 @@ Requires a C++17 compiler and CMake ≥ 3.16. Nothing else.
 ./build/ggmcp --port 0 --verbose    # ephemeral port, log every request to stderr
 ./build/ggmcp --no-session          # stateless: never issues a session id
 ./build/ggmcp --stdio               # newline-delimited JSON-RPC on stdin/stdout
+./build/ggmcp --fs-root ./work      # + read/write/edit, confined to ./work
+./build/ggmcp --fs-root ./work --allow-bash   # + a real shell (read Security first)
 ```
 
 Both transports feed the *same* dispatcher, so tool behaviour cannot drift between them.
@@ -83,12 +87,52 @@ implement session retention at all.
 
 ## Tools
 
+Always on:
+
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `hello` | `name?` string, `loud?` bool | `"Hello, <name>! (served over http by ggmcp/0.1.0)"` |
 | `echo` | `message` string (required) | the message, byte-for-byte |
 | `utc_now` | — | `{"iso8601": ..., "weekday": ..., "epochMillis": ...}` |
 | `whoami` | — | transport, session id, peer address, clientInfo |
+
+Off until you ask, because they are the ones with consequences:
+
+| Tool | Flag | Arguments | Returns |
+| --- | --- | --- | --- |
+| `read` | `--fs-root DIR` | `path` (required), `offset?`, `limit?` | the file, or a line slice plus a "lines 4-12 of 40" marker |
+| `write` | `--fs-root DIR` | `path`, `content` (required), `append?` | `wrote N bytes to <resolved path>`; creates parents |
+| `edit` | `--fs-root DIR` | `path`, `edits[]` of `{oldText, newText?}` | `applied N edits … (before -> after bytes)` |
+| `bash` | `--allow-bash` | `command` (required), `timeout?` | merged stdout+stderr; non-zero exit is `isError` |
+
+They mirror the tool names agent harnesses ship, so a client can point at them without
+learning a new vocabulary. The semantics that matter:
+
+- **`read`** refuses directories and files containing a NUL byte rather than base64-ing
+  them, and caps at 256 KiB, saying so in the returned text.
+- **`write`** replaces via a temp file plus `rename`, so a concurrent reader never sees a
+  half-written file and a failed write keeps the old contents.
+- **`edit`** validates every `oldText` against the *original* text: each must match exactly
+  once, and matches may not overlap. One bad match fails the whole call and touches
+  nothing, which is what makes a multi-edit call safe to retry.
+- **`bash`** runs `/bin/sh -c` in the server's working directory with the server's
+  environment. stderr is merged into stdout. A non-zero exit yields `isError` with an
+  `exit N` marker. The process gets its own process group, so `--bash-timeout` (or the
+  per-call `timeout`) can kill the whole tree rather than just the shell.
+
+## Confinement — what `--fs-root` does and does not buy you
+
+`read`, `write` and `edit` resolve every path with `realpath` **before** the containment
+check, then require the result to be the root or below it. Doing it in that order is the
+whole point: a lexical check on the raw string is what lets `../../etc/passwd` through, and
+it is also what lets a symlink you planted inside the root point straight out of it. Both
+are refused, and the refusal never echoes the file's contents back.
+
+It does not buy you anything against `bash`, which is a shell and can `cd` anywhere. That is
+why `--allow-bash` is a separate flag: `--fs-root` confines the file tools, and only
+explicitly opting out of that default hands out a shell. `--fs-root DIR` must name a
+directory that already exists — a typo in a security boundary should fail loudly at startup
+rather than create the typo.
 
 ## Talking to it
 
@@ -154,7 +198,7 @@ pi:
 
 ```bash
 pi mcp add ggmcp --url http://127.0.0.1:8080/mcp --description "C++ MCP server"
-pi mcp list      # ggmcp: connected, 4 tools
+pi mcp list      # ggmcp: connected, 4 tools   (8 with --fs-root + --allow-bash)
 ```
 
 Any client that speaks streamable HTTP takes the same shape:
@@ -180,9 +224,10 @@ include/ggmcp/
   protocol.hpp     Dispatcher, Tool, ToolResult, Reply, JSON-RPC codes
   http_server.hpp  minimal HTTP/1.1 server
   mcp_http.hpp     streamable-HTTP transport, Origin/session rules
-  tools.hpp        the four demo tools
+  tools.hpp        demo tools, plus the file/shell tools and path confinement
   log.hpp          stderr logging (stdout is reserved for stdio protocol frames)
 src/               matching implementations
+src/filesystem_tools.cpp   read/write/edit/bash, realpath confinement, timed shell
 src/main.cpp       CLI and transport selection
 tests/test_main.cpp       in-process JSON + dispatcher checks
 tests/http_roundtrip.py   spawns the binary; drives HTTP and stdio end to end
@@ -204,6 +249,15 @@ rejection of conflicting flags, `Origin` rejection of `http://evil.example`,
 connection, and a `Transfer-Encoding: chunked` request body reassembled in seven-byte
 chunks. It also checks that non-ASCII (`café 🚀`, tabs, newlines) survives the round trip
 through the hand-rolled JSON codec — the place where a hand-written parser usually leaks.
+
+The file and shell tools are covered from both sides. In-process: `confine_path` on
+relative, absolute, `.`/`..`, missing-tree and out-of-root-symlink inputs; the read/write/edit
+round trip on a scratch tree; `edit`'s all-or-nothing behaviour confirmed by checking the
+bytes on disk after a failed multi-edit call; and `bash` exit codes, stderr merging, timeouts
+and backgrounded grandchildren. On the wire: the same calls through real HTTP, plus that a
+refused traversal leaks no contents, that `../escape.txt` really does not appear outside the
+root, that a timeout comes back in about a second, and that with no flags sent at all the
+four file/shell tools are unknown tools (`-32602`), not merely hidden.
 
 The harness spawns each server variant itself and reads the child's stderr to discover its
 ephemeral port. Exactly one reader thread owns that pipe: two readers on one pipe is a
@@ -227,6 +281,15 @@ Bind to loopback unless something is terminating TLS in front of you: this is pl
 with no authentication of its own. `Origin` is validated against the bound port when a
 browser sends one (DNS-rebinding protection, per spec); `--allow-any-origin` turns that
 off and you should have a reason. `--host 0.0.0.0` is opt-in, not the default.
+
+Then multiply the stakes by the file and shell tools. An unauthenticated HTTP server that
+exposes `write` is a remote file-write primitive; with `--allow-bash` it is unauthenticated
+remote code execution as whoever started the process, and `Origin` will not save you — that
+header is only sent by browsers, so any `curl` or script on the network simply omits it.
+Which is why the defaults are: no file tools, no shell, loopback only, and `--fs-root`
+requiring a directory that already exists. Treat `--allow-bash` on a non-loopback bind as
+"this machine is in the blast radius", and put a real authenticating proxy in front if that
+is what you actually want.
 
 ## License
 

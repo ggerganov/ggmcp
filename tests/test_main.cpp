@@ -6,7 +6,10 @@
 // No sockets here; tests/http_roundtrip.py drives the HTTP transport.
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -499,6 +502,308 @@ void test_session_policies() {
     check(std::string(ggmcp::to_string(parsed)) == "lenient", "a rejected parse leaves the value alone");
 }
 
+// ---------------------------------------------------------------------------
+// File and shell tools
+// ---------------------------------------------------------------------------
+
+/// A scratch tree under the temp directory, removed when the test ends.
+struct ScratchSpace {
+    std::filesystem::path root;   ///< canonicalised: macOS /var is a link to /private/var
+    std::filesystem::path outside;
+
+    explicit ScratchSpace(const std::string& name) {
+        std::error_code ec;
+        root = std::filesystem::temp_directory_path() / (name + "-root");
+        outside = std::filesystem::temp_directory_path() / (name + "-outside");
+        std::filesystem::remove_all(root, ec);
+        std::filesystem::remove_all(outside, ec);
+        std::filesystem::create_directories(root, ec);
+        std::filesystem::create_directories(outside, ec);
+        {
+            std::ofstream secret(outside / "secret.txt", std::ios::binary);
+            secret << "do not read this";
+        }
+        root = std::filesystem::canonical(root, ec);
+        outside = std::filesystem::canonical(outside, ec);
+        std::filesystem::create_symlink(outside / "secret.txt", root / "link.txt", ec);
+    }
+
+    ~ScratchSpace() {
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        std::filesystem::remove_all(outside, ec);
+    }
+
+    std::string text(const std::string& relative) const {
+        std::error_code ec;
+        std::ifstream stream(root / relative, std::ios::binary);
+        std::string content;
+        if (stream) {
+            std::ostringstream buffer;
+            buffer << stream.rdbuf();
+            content = buffer.str();
+        }
+        return content;
+    }
+};
+
+/// Outcome of a tools/call, flattened out of the JSON-RPC envelope.
+struct ToolCall {
+    bool is_error = false;
+    std::string text;
+    int status = 0;
+    std::string raw;
+};
+
+ToolCall call_tool(ggmcp::Dispatcher& dispatcher, const std::string& session, const std::string& name,
+                   const std::string& arguments) {
+    ToolCall call;
+    const ggmcp::Reply reply = dispatcher.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"tools/call\",\"params\":{\"name\":\"" + name +
+            "\",\"arguments\":" + arguments + "}}",
+        http_context(session));
+    call.status = reply.status;
+    call.raw = reply.body;
+
+    ggmcp::Value message;
+    std::string error;
+    if (!ggmcp::Value::try_parse(reply.body, message, error)) {
+        call.is_error = true;
+        return call;
+    }
+
+    const ggmcp::Value* jsonrpc_error = message.find("error");
+    if (jsonrpc_error != nullptr) {   // an unknown tool is a protocol error, not a tool error
+        call.is_error = true;
+        const ggmcp::Value* message_text = jsonrpc_error->find("message");
+        if (message_text != nullptr && message_text->is_string()) call.text = message_text->as_string();
+        return call;
+    }
+
+    const ggmcp::Value* result = message.find("result");
+    const ggmcp::Value* is_error = result == nullptr ? nullptr : result->find("isError");
+    call.is_error = is_error != nullptr && is_error->as_bool();
+    const ggmcp::Value* content = result == nullptr ? nullptr : result->find("content");
+    if (content != nullptr && content->is_array() && content->size() > 0) {
+        const ggmcp::Value* text = content->at(0)->find("text");
+        if (text != nullptr && text->is_string()) call.text = text->as_string();
+    }
+    return call;
+}
+
+void test_path_confinement() {
+    group("tools/confinement");
+
+    ScratchSpace scratch("ggmcp-confine");
+    const std::string root = scratch.root.string();
+    std::string resolved;
+    std::string error;
+
+    check(ggmcp::confine_path(root, "a.txt", false, resolved, error), "a relative path is accepted");
+    check_eq(resolved, root + "/a.txt", "a relative path resolves under the root");
+
+    check(ggmcp::confine_path(root, root + "/a.txt", false, resolved, error), "an in-root absolute path is accepted");
+    check_eq(resolved, root + "/a.txt", "an absolute in-root path is unchanged");
+
+    error.clear();
+    check(!ggmcp::confine_path(root, "../a.txt", false, resolved, error), "'..' out of the root is rejected");
+    check(!error.empty(), "a rejected path explains itself");
+
+    check(!ggmcp::confine_path(root, "/etc/passwd", false, resolved, error), "an out-of-root absolute path is rejected");
+    check(!ggmcp::confine_path(root, "", false, resolved, error), "an empty path is rejected");
+
+    check(ggmcp::confine_path(root, "sub/./a.txt", false, resolved, error), "'.' components are accepted");
+    check(ggmcp::confine_path(root, "deep/deeper/a.txt", false, resolved, error),
+          "missing intermediate directories are tolerated");
+    check_eq(resolved, root + "/deep/deeper/a.txt", "a missing tree resolves verbatim");
+
+    // The point of canonicalising before checking: a link that leaves the tree
+    // must fail even though the path the caller typed looks local.
+    check(!ggmcp::confine_path(root, "link.txt", false, resolved, error),
+          "a symlink pointing out of the root is rejected");
+
+    check(ggmcp::confine_path(root, "../../etc/passwd", true, resolved, error),
+          "allow_outside_root lets an escaping path through");
+}
+
+void test_filesystem_tools() {
+    group("tools/file");
+
+    ScratchSpace scratch("ggmcp-file");
+    ggmcp::FileSystemOptions options;
+    options.root = scratch.root.string();
+    options.enable_file_tools = true;
+
+    ggmcp::Dispatcher dispatcher("test-server", "1");
+    ggmcp::register_demo_tools(dispatcher);
+    ggmcp::register_filesystem_tools(dispatcher, options);
+    check_eq(std::to_string(dispatcher.tool_names().size()), "7",
+             "read/write/edit join the four demo tools");
+    check(!dispatcher.has_tool("bash"), "bash stays off without --allow-bash");
+
+    // tools/list advertises the new tools with schemas.
+    const ggmcp::Reply listed =
+        dispatcher.handle("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
+                          http_context("s"));
+    check_has(listed.body, "\"name\":\"read\"", "tools/list includes read");
+    check_has(listed.body, "\"name\":\"write\"", "tools/list includes write");
+    check_has(listed.body, "\"name\":\"edit\"", "tools/list includes edit");
+    check_has(listed.body, "readOnlyHint", "tools/list carries annotations");
+
+    // write creates a file, and creates parents on the way.
+    const ToolCall write = call_tool(dispatcher, "s", "write", "{\"path\":\"a.txt\",\"content\":\"one\\n\"}");
+    check(!write.is_error, "write succeeds");
+    check_has(write.text, "wrote 4 bytes", "write reports the byte count");
+    check_eq(scratch.text("a.txt"), "one\n", "write put the bytes on disk");
+
+    const ToolCall nested =
+        call_tool(dispatcher, "s", "write", "{\"path\":\"x/y/z.txt\",\"content\":\"nested\"}");
+    check(!nested.is_error, "write creates missing parent directories");
+    check_eq(scratch.text("x/y/z.txt"), "nested", "the nested file landed");
+
+    const ToolCall append =
+        call_tool(dispatcher, "s", "write", "{\"path\":\"a.txt\",\"content\":\"two\\n\",\"append\":true}");
+    check(!append.is_error, "append succeeds");
+    check_eq(scratch.text("a.txt"), "one\ntwo\n", "append added to the end");
+
+    // read returns it, and slices by line.
+    const ToolCall read = call_tool(dispatcher, "s", "read", "{\"path\":\"a.txt\"}");
+    check(!read.is_error, "read succeeds");
+    check_eq(read.text, "one\ntwo\n", "read returns the whole file");
+
+    const ToolCall slice = call_tool(dispatcher, "s", "read", "{\"path\":\"a.txt\",\"offset\":2}");
+    check(!slice.is_error, "read with an offset succeeds");
+    check_eq(slice.text, "two\n", "read honours offset");
+
+    const ToolCall too_far = call_tool(dispatcher, "s", "read", "{\"path\":\"a.txt\",\"offset\":99}");
+    check(too_far.is_error, "an offset past the end is an error");
+    check_has(too_far.text, "past the end", "the offset error says so");
+
+    const ToolCall missing = call_tool(dispatcher, "s", "read", "{\"path\":\"nope.txt\"}");
+    check(missing.is_error, "reading a missing file is an error");
+
+    const ToolCall directory = call_tool(dispatcher, "s", "read", "{\"path\":\"x\"}");
+    check(directory.is_error, "reading a directory is an error");
+
+    // edit: several disjoint edits in one call.
+    call_tool(dispatcher, "s", "write",
+              "{\"path\":\"b.txt\",\"content\":\"alpha\\nbeta\\ngamma\\n\"}");
+    const ToolCall edited = call_tool(dispatcher, "s", "edit",
+                                     "{\"path\":\"b.txt\",\"edits\":[{\"oldText\":\"alpha\","
+                                     "\"newText\":\"ALPHA\"},{\"oldText\":\"gamma\",\"newText\":\"OMEGA\"}]}");
+    check(!edited.is_error, "a multi-edit call succeeds");
+    check_eq(scratch.text("b.txt"), "ALPHA\nbeta\nOMEGA\n", "both edits applied");
+
+    // An ambiguous or missing match leaves the file untouched.
+    const ToolCall ambiguous =
+        call_tool(dispatcher, "s", "edit", "{\"path\":\"b.txt\",\"edits\":[{\"oldText\":\"A\",\"newText\":\"X\"}]}");
+    check(ambiguous.is_error, "an ambiguous oldText is an error");
+    check_has(ambiguous.text, "more than once", "the ambiguity is explained");
+    check_eq(scratch.text("b.txt"), "ALPHA\nbeta\nOMEGA\n", "an ambiguous edit changed nothing");
+
+    const ToolCall partial =
+        call_tool(dispatcher, "s", "edit", "{\"path\":\"b.txt\",\"edits\":[{\"oldText\":\"ALPHA\","
+                                       "\"newText\":\"1\"},{\"oldText\":\"absent\",\"newText\":\"2\"}]}");
+    check(partial.is_error, "one bad edit fails the whole call");
+    check_eq(scratch.text("b.txt"), "ALPHA\nbeta\nOMEGA\n", "a failed multi-edit call is all-or-nothing");
+
+    const ToolCall empty_old =
+        call_tool(dispatcher, "s", "edit", "{\"path\":\"b.txt\",\"edits\":[{\"oldText\":\"\",\"newText\":\"X\"}]}");
+    check(empty_old.is_error, "an empty oldText is rejected");
+
+    const ToolCall no_edits = call_tool(dispatcher, "s", "edit", "{\"path\":\"b.txt\",\"edits\":[]}");
+    check(no_edits.is_error, "an empty edits array is rejected");
+
+    const ToolCall bad_type = call_tool(dispatcher, "s", "edit", "{\"path\":\"b.txt\",\"edits\":\"nope\"}");
+    check(bad_type.is_error, "a non-array edits value is rejected");
+
+    const ToolCall missing_file =
+        call_tool(dispatcher, "s", "edit", "{\"path\":\"nope.txt\",\"edits\":[{\"oldText\":\"a\",\"newText\":\"b\"}]}");
+    check(missing_file.is_error, "editing a missing file is an error");
+
+    // Binary content is refused rather than encoded, and an oversized read is cut
+    // with a marker so the model knows it is looking at a fragment.
+    check(!call_tool(dispatcher, "s", "write", "{\"path\":\"bin.dat\",\"content\":\"\\u0000secret-bytes\"}").is_error,
+          "write does not care what the bytes are");
+    const ToolCall binary_read = call_tool(dispatcher, "s", "read", "{\"path\":\"bin.dat\"}");
+    check(binary_read.is_error, "read refuses a file containing a NUL byte");
+    check(!contains(binary_read.text, "secret-bytes"), "the refusal does not echo the payload");
+
+    ggmcp::FileSystemOptions tiny = options;
+    tiny.max_read_bytes = 8;
+    ggmcp::Dispatcher tiny_dispatcher("test-server", "1");
+    ggmcp::register_filesystem_tools(tiny_dispatcher, tiny);
+    const ToolCall cut = call_tool(tiny_dispatcher, "s", "read", "{\"path\":\"b.txt\"}");
+    check(!cut.is_error, "an oversized file is still readable");
+    check_has(cut.text, "truncated at 8 of 17 bytes", "the truncation is marked and measured");
+    check_eq(cut.text.substr(0, 8), "ALPHA\nbe", "and it returns exactly the cap");
+
+    // Confinement, through the tools rather than confine_path directly.
+    const ToolCall escape = call_tool(dispatcher, "s", "read", "{\"path\":\"../../etc/passwd\"}");
+    check(escape.is_error, "read refuses to leave the root");
+    check_has(escape.text, "outside the workspace root", "the escape error names the root");
+
+    const ToolCall via_link = call_tool(dispatcher, "s", "read", "{\"path\":\"link.txt\"}");
+    check(via_link.is_error, "read refuses to follow a symlink out of the root");
+    check(!contains(via_link.text, "do not read this"), "the refusal does not leak the file");
+
+    const ToolCall write_outside =
+        call_tool(dispatcher, "s", "write", "{\"path\":\"../escape.txt\",\"content\":\"x\"}");
+    check(write_outside.is_error, "write refuses to leave the root");
+    check(!std::filesystem::exists(scratch.outside / "escape.txt"), "nothing was written outside");
+
+    // Argument validation happens before any I/O.
+    check(call_tool(dispatcher, "s", "write", "{\"path\":\"c.txt\"}").is_error, "write needs content");
+    check(call_tool(dispatcher, "s", "read", "{\"offset\":1}").is_error, "read needs a path");
+    check(call_tool(dispatcher, "s", "read", "{\"path\":42}").is_error, "read rejects a non-string path");
+    check(call_tool(dispatcher, "s", "read", "{\"path\":\"a.txt\",\"offset\":0}").is_error,
+          "read rejects an offset below 1");
+}
+
+void test_bash_tool() {
+    group("tools/bash");
+
+    ScratchSpace scratch("ggmcp-bash");
+    ggmcp::FileSystemOptions options;
+    options.root = scratch.root.string();
+    options.enable_file_tools = true;
+    options.enable_bash = true;
+    options.bash_timeout_seconds = 2;
+
+    ggmcp::Dispatcher dispatcher("test-server", "1");
+    ggmcp::register_demo_tools(dispatcher);
+    ggmcp::register_filesystem_tools(dispatcher, options);
+    check_eq(std::to_string(dispatcher.tool_names().size()), "8", "bash joins once enabled");
+
+    const ToolCall echo = call_tool(dispatcher, "s", "bash", "{\"command\":\"echo hi\"}");
+    check(!echo.is_error, "a successful command is not an error");
+    check_eq(echo.text, "hi", "stdout is captured");
+
+    // stderr is merged into the same text block, and a non-zero exit is an error.
+    const ToolCall failing =
+        call_tool(dispatcher, "s", "bash", "{\"command\":\"echo out; echo err >&2; exit 3\"}");
+    check(failing.is_error, "a non-zero exit sets isError");
+    check_has(failing.text, "out", "stdout survives a failing command");
+    check_has(failing.text, "err", "stderr survives a failing command");
+    check_has(failing.text, "exit 3", "the exit code is reported");
+
+    const ToolCall timeout = call_tool(dispatcher, "s", "bash", "{\"command\":\"sleep 20\",\"timeout\":1}");
+    check(timeout.is_error, "a timeout is an error");
+    check_has(timeout.text, "timed out", "the timeout is explained");
+
+    const ToolCall bad_timeout = call_tool(dispatcher, "s", "bash", "{\"command\":\"echo hi\",\"timeout\":0}");
+    check(bad_timeout.is_error, "a zero timeout is rejected");
+
+    check(call_tool(dispatcher, "s", "bash", "{\"command\":\"\"}").is_error, "an empty command is rejected");
+    check(call_tool(dispatcher, "s", "bash", "{}").is_error, "bash needs a command");
+
+    // A backgrounded grandchild must not turn a finished command into a timeout.
+    const ToolCall straggler =
+        call_tool(dispatcher, "s", "bash", "{\"command\":\"(sleep 20 &) ; echo spawned\",\"timeout\":5}");
+    check(!straggler.is_error, "a command that backgrounds a child still succeeds");
+    check_has(straggler.text, "spawned", "the straggler's parent output is kept");
+}
+
 int main() {
     test_json_scalars();
     test_json_strings();
@@ -514,6 +819,10 @@ int main() {
     test_session_policies();
     test_stdio_skips_session_checks();
     test_origins();
+
+    test_path_confinement();
+    test_filesystem_tools();
+    test_bash_tool();
 
     if (g_failures != 0) {
         std::fprintf(stderr, "\n%d of %d checks FAILED\n", g_failures, g_checks);

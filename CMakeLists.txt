@@ -21,6 +21,7 @@ add_library(ggmcp_core STATIC
   src/http_server.cpp
   src/mcp_http.cpp
   src/tools.cpp
+  src/filesystem_tools.cpp
 )
 target_include_directories(ggmcp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(ggmcp_core PUBLIC Threads::Threads)

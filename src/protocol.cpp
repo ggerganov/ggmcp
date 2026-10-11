@@ -61,6 +61,19 @@ Value boolean(const std::string& description) {
     return Value::make_object(std::move(v));
 }
 
+Value array(const std::string& description, Value items, std::int64_t min_items) {
+    Object v;
+    v["type"] = Value::make_string("array");
+    if (!description.empty()) v["description"] = Value::make_string(description);
+    v["items"] = std::move(items);
+    if (min_items > 0) v["minItems"] = Value::make_int(min_items);
+    return Value::make_object(std::move(v));
+}
+
+Value string_array(const std::string& description, std::int64_t min_items) {
+    return array(description, Value::make_object(Object{{"type", Value::make_string("string")}}), min_items);
+}
+
 Value object(std::map<std::string, Value> properties, std::vector<std::string> required) {
     Object v;
     v["type"] = Value::make_string("object");
@@ -102,6 +115,14 @@ void Dispatcher::add_tool(Tool tool) {
 std::size_t Dispatcher::tool_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return tools_.size();
+}
+
+bool Dispatcher::has_tool(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& tool : tools_) {
+        if (tool.name == name) return true;
+    }
+    return false;
 }
 
 std::vector<std::string> Dispatcher::tool_names() const {

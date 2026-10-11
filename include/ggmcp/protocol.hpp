@@ -116,6 +116,8 @@ Value string(const std::string& description, const std::vector<std::string>& all
 Value integer(const std::string& description);
 Value boolean(const std::string& description);
 Value object(std::map<std::string, Value> properties, std::vector<std::string> required = {});
+Value array(const std::string& description, Value items, std::int64_t min_items = 1);
+Value string_array(const std::string& description, std::int64_t min_items = 0);
 }  // namespace schema
 
 /// One client handshake. HTTP transports look these up by Mcp-Session-Id.
@@ -151,6 +153,7 @@ public:
 
     void add_tool(Tool tool);
     std::size_t tool_count() const;
+    bool has_tool(const std::string& name) const;
     std::vector<std::string> tool_names() const;
 
     /// Session strictness. Set before serving; read-only afterwards.

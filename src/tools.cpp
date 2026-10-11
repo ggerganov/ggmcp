@@ -48,16 +48,6 @@ bool optional_bool(const Value& args, const char* key, bool& out, std::string& e
     return true;
 }
 
-Value annotations(const std::string& title, bool read_only, bool destructive, bool idempotent) {
-    Object object;
-    object["title"] = Value::make_string(title);
-    object["readOnlyHint"] = Value::make_bool(read_only);
-    object["destructiveHint"] = Value::make_bool(destructive);
-    object["idempotentHint"] = Value::make_bool(idempotent);
-    object["openWorldHint"] = Value::make_bool(false);
-    return Value::make_object(std::move(object));
-}
-
 /// Convenience for a tool that answers with one JSON document.
 ToolResult as_json(Object payload) { return ToolResult::json(Value::make_object(std::move(payload)).dump()); }
 
@@ -75,7 +65,7 @@ void register_demo_tools(Dispatcher& dispatcher) {
             {{"name", schema::string("Who to greet. Defaults to \"world\".")},
              {"loud", schema::boolean("Shout the greeting in upper case.")}},
             {});
-        tool.annotations = annotations("Say hello", /*read_only=*/true, /*destructive=*/false,
+        tool.annotations = tool_annotations("Say hello", /*read_only=*/true, /*destructive=*/false,
                                       /*idempotent=*/true);
         tool.handler = [](const Value& args, const Context& ctx) -> ToolResult {
             std::string error;
@@ -101,7 +91,7 @@ void register_demo_tools(Dispatcher& dispatcher) {
                            "client round-trips arguments and content correctly.";
         tool.input_schema = schema::object({{"message", schema::string("Text to echo back unchanged.")}},
                                            {"message"});
-        tool.annotations = annotations("Echo text", /*read_only=*/true, /*destructive=*/false,
+        tool.annotations = tool_annotations("Echo text", /*read_only=*/true, /*destructive=*/false,
                                       /*idempotent=*/true);
         tool.handler = [](const Value& args, const Context&) -> ToolResult {
             const Value* message = args.find("message");
@@ -120,7 +110,7 @@ void register_demo_tools(Dispatcher& dispatcher) {
         tool.description = "Reports the server's current wall-clock time in UTC as ISO-8601 plus "
                            "epoch milliseconds. Takes no arguments.";
         tool.input_schema = schema::object({}, {});
-        tool.annotations = annotations("Current UTC time", /*read_only=*/true, /*destructive=*/false,
+        tool.annotations = tool_annotations("Current UTC time", /*read_only=*/true, /*destructive=*/false,
                                       /*idempotent=*/false);
         tool.handler = [](const Value&, const Context&) -> ToolResult {
             const auto now = std::chrono::system_clock::now();
@@ -154,7 +144,7 @@ void register_demo_tools(Dispatcher& dispatcher) {
                            "and the clientInfo the caller sent during initialize. Handy for "
                            "debugging a client connection.";
         tool.input_schema = schema::object({}, {});
-        tool.annotations = annotations("Describe this session", /*read_only=*/true, /*destructive=*/false,
+        tool.annotations = tool_annotations("Describe this session", /*read_only=*/true, /*destructive=*/false,
                                       /*idempotent=*/true);
         tool.handler = [](const Value&, const Context& ctx) -> ToolResult {
             Object payload;

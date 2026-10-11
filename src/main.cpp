@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,9 @@ void print_usage(const char* argv0) {
         "                         that lack a known Mcp-Session-Id\n"
         "  --no-session           alias for --session-policy stateless: never issue\n"
         "                         a session id, so clients need no handshake state\n"
+        "  --fs-root DIR          enable the read/write/edit tools, confined to DIR\n"
+        "  --allow-bash           enable the bash tool (a real shell, see below)\n"
+        "  --bash-timeout SEC     wall-clock budget per bash command (default 30)\n"
         "  -v, --verbose          log every request to stderr\n"
         "  --version              print the version and exit\n"
         "  -h, --help             this text\n"
@@ -58,7 +62,11 @@ void print_usage(const char* argv0) {
         "          \"capabilities\":{}}}'\n"
         "\n"
         "By default echoing the Mcp-Session-Id response header is optional; clients\n"
-        "that cannot retain it are served against an implicit session.\n",
+        "that cannot retain it are served against an implicit session.\n"
+        "\n"
+        "The read/write/edit/bash tools are OFF unless asked for. --fs-root confines\n"
+        "the file tools to DIR; nothing confines bash, so --allow-bash hands out a\n"
+        "shell with this process' privileges and should stay off a routable port.\n",
         ggmcp::kDefaultServerName, ggmcp::kDefaultServerVersion, program.c_str(), program.c_str(),
         ggmcp::latest_protocol_version().c_str());
 }
@@ -71,6 +79,9 @@ struct Options {
     ggmcp::SessionPolicy session_policy = ggmcp::SessionPolicy::Lenient;
     bool require_session = false;
     bool no_session = false;
+    std::string fs_root;
+    bool allow_bash = false;
+    int bash_timeout = 30;
     bool verbose = false;
     bool help = false;
     bool version = false;
@@ -94,6 +105,16 @@ bool parse_host_port(const std::string& text, std::string& host, std::uint16_t& 
     if (!end || *end != '\0' || parsed < 0 || parsed > 65535) return false;
     host = host_text;
     port = static_cast<std::uint16_t>(parsed);
+    return true;
+}
+
+/// Parses a positive integer, rejecting anything else.
+bool parse_int(const std::string& text, int& out) {
+    if (text.empty()) return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(text.c_str(), &end, 10);
+    if (!end || *end != '\0' || parsed < 0 || parsed > 1000000) return false;
+    out = static_cast<int>(parsed);
     return true;
 }
 
@@ -177,6 +198,24 @@ Options parse_args(int argc, char** argv) {
                 options.error = "--session-policy expects lenient|strict|stateless, got '" + value + "'";
                 return options;
             }
+        } else if (arg == "--fs-root") {
+            if (const char* v = next_value()) options.fs_root = v;
+        } else if (arg.rfind("--fs-root=", 0) == 0) {
+            options.fs_root = arg.substr(10);
+        } else if (arg == "--allow-bash") {
+            options.allow_bash = true;
+        } else if (arg == "--bash-timeout") {
+            if (const char* v = next_value()) {
+                if (!parse_int(v, options.bash_timeout)) {
+                    options.error = "--bash-timeout expects a number of seconds, got '" + std::string(v) + "'";
+                    return options;
+                }
+            }
+        } else if (arg.rfind("--bash-timeout=", 0) == 0) {
+            if (!parse_int(arg.substr(15), options.bash_timeout)) {
+                options.error = "--bash-timeout expects a number of seconds, got '" + arg.substr(15) + "'";
+                return options;
+            }
         } else if (arg == "-v" || arg == "--verbose") {
             options.verbose = true;
         } else if (arg == "--version") {
@@ -197,6 +236,11 @@ Options parse_args(int argc, char** argv) {
     }
     if (options.require_session) options.session_policy = ggmcp::SessionPolicy::Strict;
     if (options.no_session) options.session_policy = ggmcp::SessionPolicy::Stateless;
+
+    if (options.bash_timeout < 1 || options.bash_timeout > 3600) {
+        options.error = "--bash-timeout must be between 1 and 3600 seconds";
+        return options;
+    }
 
     if (options.http.endpoint.empty()) options.http.endpoint = "/mcp";
     if (options.http.endpoint.front() != '/') options.http.endpoint = "/" + options.http.endpoint;
@@ -225,9 +269,25 @@ int main(int argc, char** argv) {
 
     ggmcp::set_verbose(options.verbose);
 
+    ggmcp::FileSystemOptions filesystem;
+    filesystem.enable_file_tools = !options.fs_root.empty();
+    filesystem.enable_bash = options.allow_bash;
+    filesystem.bash_timeout_seconds = options.bash_timeout;
+    if (!options.fs_root.empty()) {
+        std::error_code ec;
+        const std::filesystem::path canonical = std::filesystem::canonical(options.fs_root, ec);
+        if (ec) {
+            std::fprintf(stderr, "%s: --fs-root \"%s\" cannot be resolved: %s\n", ggmcp::kDefaultServerName,
+                         options.fs_root.c_str(), ec.message().c_str());
+            return 2;
+        }
+        filesystem.root = canonical.string();
+    }
+
     ggmcp::Dispatcher dispatcher(ggmcp::kDefaultServerName, ggmcp::kDefaultServerVersion);
     dispatcher.session_policy(options.session_policy);
     ggmcp::register_demo_tools(dispatcher);
+    ggmcp::register_filesystem_tools(dispatcher, filesystem);
 
     if (options.stdio) return ggmcp::serve_stdio(dispatcher);
 
@@ -252,6 +312,8 @@ int main(int argc, char** argv) {
     ggmcp::log_line(std::string(ggmcp::kDefaultServerName) + " " + ggmcp::kDefaultServerVersion +
                     " ready - tools: " + tools + " - session policy: " +
                     ggmcp::to_string(options.session_policy));
+    if (filesystem.enable_file_tools) ggmcp::log_line("file tools confined to " + filesystem.root);
+    if (filesystem.enable_bash) ggmcp::log_line("bash is ENABLED - commands run with this process' privileges");
     if (options.http.enable_health_endpoint) ggmcp::log_line("GET /health reports status");
     ggmcp::log_line("press Ctrl-C to stop");
 

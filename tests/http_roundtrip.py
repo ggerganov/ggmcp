@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """End-to-end test for the ggmcp MCP server.
 
-Spawns the real binary and drives the full MCP streamable-HTTP handshake, plus
-the stdio transport, using only the Python standard library.
+Spawns the real binary and drives the full MCP streamable-HTTP handshake, the
+stdio transport, and the optional file/shell tools, using only the Python
+standard library.
 
 Usage: http_roundtrip.py /path/to/ggmcp
 """
@@ -15,6 +16,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -568,6 +570,165 @@ def test_flag_validation(binary):
         check_eq(process.returncode, 0, f"{flag} --help exits 0")
         check_has(process.stdout, "--session-policy", "--help documents --session-policy")
 
+    # The file and shell tools need their own kind of validation: a root that
+    # cannot be resolved must stop the server rather than quietly widen the scope.
+    with tempfile.TemporaryDirectory(prefix="ggmcp-flag-") as root:
+        cases = [
+            (["--fs-root"], "--fs-root needs a value"),
+            (["--fs-root", os.path.join(root, "nowhere")], "cannot be resolved"),
+            (["--bash-timeout", "0"], "--bash-timeout must be between 1 and 3600"),
+            (["--bash-timeout", "soon"], "--bash-timeout expects a number"),
+        ]
+        for args, want in cases:
+            process = subprocess.run([binary, *args], capture_output=True, text=True, timeout=10)
+            check_eq(process.returncode, 2, f"{' '.join(args)} exits 2")
+            check_has(process.stderr, want, f"the error for {' '.join(args)}")
+
+        # An existing root starts fine and says so in the banner.
+        with Server(binary, ["--http", "127.0.0.1:0", "--fs-root", root]) as server:
+            host, port, path = server.wait_for_port()
+            check_has(server.wait_for_log(r"file tools confined to").group(0), "file tools confined to",
+                      "--fs-root logs the root")
+            _, _, health = get_json(host, port, "/health")
+            check_eq(sorted(health.get("tools", [])),
+                     ["echo", "edit", "hello", "read", "utc_now", "whoami", "write"],
+                     "--fs-root advertises seven tools")
+            check("bash" not in health.get("tools", []), "--fs-root alone does not enable bash")
+
+
+def tool_text(host, port, path, session, name, arguments):
+    """Calls a tool and returns (is_error, text). Tool errors travel in a 200 result."""
+    status, _, body = call_tool(host, port, path, session, name, arguments)
+    check_eq(status, 200, f"{name} returns HTTP 200")
+    if "result" not in body:
+        return True, json.dumps(body)
+    result = body["result"]
+    content = result.get("content") or [{}]
+    return bool(result.get("isError")), content[0].get("text", "")
+
+
+def test_filesystem_tools(binary):
+    """--fs-root turns on read/write/edit confined to a directory; --allow-bash adds a shell."""
+    print("\n== filesystem tools ==")
+    with tempfile.TemporaryDirectory(prefix="ggmcp-fs-") as root, \
+            tempfile.TemporaryDirectory(prefix="ggmcp-fs-out-") as outside:
+        secret = os.path.join(outside, "secret.txt")
+        with open(secret, "w") as handle:
+            handle.write("do not read this")
+        os.symlink(secret, os.path.join(root, "link.txt"))
+
+        with Server(binary, ["--http", "127.0.0.1:0", "--fs-root", root, "--allow-bash"]) as server:
+            host, port, path = server.wait_for_port()
+            check_has(server.wait_for_log(r"file tools confined to").group(0), "file tools confined to",
+                      "the banner names the confinement root")
+            check_has(server.wait_for_log(r"bash is ENABLED").group(0), "bash is ENABLED",
+                      "the banner warns that bash is on")
+
+            session = test_handshake(host, port, path)
+
+            status, _, body = post(host, port, path, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                                   session=session)
+            names = sorted(tool["name"] for tool in body["result"]["tools"])
+            check_eq(names, ["bash", "echo", "edit", "hello", "read", "utc_now", "whoami", "write"],
+                     "eight tools with the file and shell tools enabled")
+
+            # write -> read, including directories that do not exist yet.
+            is_error, text = tool_text(host, port, path, session, "write",
+                                       {"path": "a.txt", "content": "alpha\nbeta\ngamma\n"})
+            check(not is_error, "write succeeds over the wire")
+            check_has(text, "wrote 17 bytes", "write reports the size")
+            with open(os.path.join(root, "a.txt")) as handle:
+                check_eq(handle.read(), "alpha\nbeta\ngamma\n", "write reached the filesystem")
+
+            is_error, text = tool_text(host, port, path, session, "write",
+                                       {"path": "x/y/z.txt", "content": "nested"})
+            check(not is_error, "write creates parent directories")
+            check(os.path.isfile(os.path.join(root, "x/y/z.txt")), "the nested file exists")
+
+            is_error, text = tool_text(host, port, path, session, "read", {"path": "a.txt"})
+            check(not is_error, "read succeeds")
+            check_eq(text, "alpha\nbeta\ngamma\n", "read returns the file verbatim")
+
+            is_error, text = tool_text(host, port, path, session, "read",
+                                       {"path": "a.txt", "offset": 2, "limit": 1})
+            check(not is_error, "read with offset/limit succeeds")
+            check_has(text, "beta", "read honours offset")
+            check_has(text, "lines 2-2 of 3", "read reports the slice")
+
+            is_error, text = tool_text(host, port, path, session, "edit", {
+                "path": "a.txt",
+                "edits": [{"oldText": "alpha", "newText": "ALPHA"},
+                          {"oldText": "gamma", "newText": "OMEGA"}],
+            })
+            check(not is_error, "a multi-edit call succeeds")
+            with open(os.path.join(root, "a.txt")) as handle:
+                check_eq(handle.read(), "ALPHA\nbeta\nOMEGA\n", "both edits landed on disk")
+
+            # A failed edit must leave the file exactly as it was.
+            is_error, text = tool_text(host, port, path, session, "edit",
+                                       {"path": "a.txt", "edits": [{"oldText": "A", "newText": "X"}]})
+            check(is_error, "an ambiguous oldText is a tool error")
+            check_has(text, "more than once", "the ambiguity is explained")
+            with open(os.path.join(root, "a.txt")) as handle:
+                check_eq(handle.read(), "ALPHA\nbeta\nOMEGA\n", "a failed edit changed nothing")
+
+            # Confinement.
+            is_error, text = tool_text(host, port, path, session, "read", {"path": "../../etc/passwd"})
+            check(is_error, "a traversal out of the root is refused")
+            check_has(text, "outside the workspace root", "the traversal error names the root")
+
+            is_error, text = tool_text(host, port, path, session, "read", {"path": "/etc/passwd"})
+            check(is_error, "an absolute out-of-root path is refused")
+
+            is_error, text = tool_text(host, port, path, session, "read", {"path": "link.txt"})
+            check(is_error, "a symlink out of the root is refused")
+            check("do not read this" not in text, "the refusal leaks nothing")
+
+            is_error, text = tool_text(host, port, path, session, "write",
+                                       {"path": "../escape.txt", "content": "x"})
+            check(is_error, "write refuses to leave the root")
+            check(not os.path.exists(os.path.join(os.path.dirname(root), "escape.txt")),
+                  "nothing was written outside the root")
+
+            # bash
+            is_error, text = tool_text(host, port, path, session, "bash", {"command": "echo wired"})
+            check(not is_error, "bash runs a command")
+            check_eq(text, "wired", "bash captures stdout")
+
+            is_error, text = tool_text(host, port, path, session, "bash",
+                                       {"command": "echo o; echo e >&2; exit 7"})
+            check(is_error, "a failing command sets isError")
+            check_has(text, "o", "bash keeps stdout on failure")
+            check_has(text, "e", "bash merges stderr")
+            check_has(text, "exit 7", "bash reports the exit code")
+
+            started = time.time()
+            is_error, text = tool_text(host, port, path, session, "bash", {"command": "sleep 30", "timeout": 1})
+            elapsed = time.time() - started
+            check(is_error, "a timeout is an error")
+            check_has(text, "timed out", "the timeout is explained")
+            check(1.0 <= elapsed < 5.0, f"the timeout fired promptly (took {elapsed:.2f}s)")
+
+            is_error, text = tool_text(host, port, path, session, "bash",
+                                       {"command": "(sleep 30 &) ; echo spawned", "timeout": 5})
+            check(not is_error, "a backgrounded grandchild does not fail the command")
+            check_has(text, "spawned", "the straggler's parent output survives")
+
+            is_error, text = tool_text(host, port, path, session, "bash", {"command": "printf x", "timeout": 0})
+            check(is_error, "an out-of-range timeout is rejected")
+
+
+def test_tools_off_by_default(binary):
+    """Without --fs-root / --allow-bash the file and shell tools must not exist."""
+    print("\n== file tools are off by default ==")
+    with Server(binary, ["--http", "127.0.0.1:0"]) as server:
+        host, port, path = server.wait_for_port()
+        session = test_handshake(host, port, path)
+        for name in ("read", "write", "edit", "bash"):
+            status, _, body = call_tool(host, port, path, session, name, {"path": "a.txt", "command": "echo"})
+            check_eq(status, 200, f"{name} is not reachable at the HTTP layer")
+            check_eq(body["error"]["code"], -32602, f"{name} is an unknown tool")
+
 
 def test_stdio(binary):
     print("\n== stdio transport ==")
@@ -644,6 +805,8 @@ def main():
 
     test_session_policies(binary)
     test_flag_validation(binary)
+    test_filesystem_tools(binary)
+    test_tools_off_by_default(binary)
     test_stdio(binary)
 
     signal.alarm(0)  # cancel the watchdog
