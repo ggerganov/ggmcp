@@ -2,9 +2,11 @@
 //
 // SPDX-License-Identifier: MIT
 //
-// main.cpp - command line and transport selection. Default transport is MCP
-// streamable HTTP on 127.0.0.1:8080; --stdio switches to newline-delimited
-// JSON-RPC on stdin/stdout.
+// main.cpp - command line and transport selection. The defaults are a server
+// you can just run: MCP streamable HTTP on 0.0.0.0:8081, read/write/edit
+// confined to your home directory, the shell tool on, Origin unchecked. Every
+// one of those has a --no-* or --strict-* counterpart, and --stdio switches to
+// newline-delimited JSON-RPC on stdin/stdout.
 
 #include <cstdint>
 #include <cstdio>
@@ -14,6 +16,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <pwd.h>
+#include <unistd.h>
 
 #include "ggmcp/http_server.hpp"
 #include "ggmcp/log.hpp"
@@ -31,16 +36,29 @@ void print_usage(const char* argv0) {
         "Usage:\n"
         "  %s [options]\n"
         "\n"
+        "With no options at all, this is what you are running:\n"
+        "\n"
+        "  %s --host 0.0.0.0 --port 8081 --allow-bash --fs-root ~ --allow-any-origin\n"
+        "\n"
+        "Every interface, the home directory as the file root, a shell, and no Origin\n"
+        "check - a server you do not have to configure. Take any of it back with:\n"
+        "\n"
+        "  %s --host 127.0.0.1 --no-file-tools --no-bash --strict-origin\n"
+        "\n"
         "Transports:\n"
-        "  --http [HOST:]PORT   serve MCP over streamable HTTP (default: 127.0.0.1:8080)\n"
+        "  --http [HOST:]PORT   serve MCP over streamable HTTP (default: 0.0.0.0:8081)\n"
         "  --stdio              serve newline-delimited JSON-RPC on stdin/stdout\n"
         "\n"
         "Options:\n"
-        "  --host HOST            bind address (default 127.0.0.1)\n"
-        "  --port PORT            port; 0 asks the OS for a free one (default 8080)\n"
+        "  --host HOST            bind address (default 0.0.0.0: every interface)\n"
+        "  --port PORT            port; 0 asks the OS for a free one (default 8081)\n"
         "  --endpoint PATH        MCP endpoint path (default /mcp)\n"
-        "  --allow-origin ORIGIN  accept an extra Origin; repeatable\n"
-        "  --allow-any-origin     accept any Origin (drops the DNS-rebinding guard)\n"
+        "  --allow-origin ORIGIN  accept an extra Origin; repeatable. Naming one turns\n"
+        "                         the default any-Origin off, so the list is what is allowed\n"
+        "  --allow-any-origin     accept any Origin (default: on; drops the DNS-rebinding\n"
+        "                         guard, so a browser page can drive this server)\n"
+        "  --strict-origin        check Origin against the bound port instead: the guard\n"
+        "                         back on, plus whatever --allow-origin named\n"
         "  --no-health            do not serve GET /health\n"
         "  --no-index             do not serve GET /\n"
         "  --session-policy MODE  lenient (default) | strict | stateless\n"
@@ -48,8 +66,11 @@ void print_usage(const char* argv0) {
         "                         that lack a known Mcp-Session-Id\n"
         "  --no-session           alias for --session-policy stateless: never issue\n"
         "                         a session id, so clients need no handshake state\n"
-        "  --fs-root DIR          enable read/write/edit, confined to DIR (must already exist)\n"
-        "  --allow-bash           enable the bash tool (a real shell, see below)\n"
+        "  --fs-root DIR          confine read/write/edit to DIR (default: your home\n"
+        "                         directory; it must already exist)\n"
+        "  --no-file-tools        do not offer read/write/edit at all\n"
+        "  --allow-bash           offer the bash tool (default: on)\n"
+        "  --no-bash              do not offer the bash tool\n"
         "  --bash-timeout SEC     wall-clock budget per bash command (default 30)\n"
         "  --require-token        require 'Authorization: Bearer <token>' on every request\n"
         "  --token-env NAME       take a token from environment variable NAME; repeatable\n"
@@ -58,18 +79,14 @@ void print_usage(const char* argv0) {
         "                         when the file changes, so tokens rotate without a restart\n"
         "  --token-stdin          take one token from stdin at startup\n"
         "                         (there is no --token FLAG on purpose: argv is world-readable)\n"
-        "  --public-url URL       advertise this URL in auth challenges and metadata, for\n"
-        "                         runs behind a proxy; must be absolute, with no path\n"
-        "  --authorization-server URL  advertise this authorization server; repeatable.\n"
-        "                         Nothing here contacts it: it is a signpost for clients\n"
         "  -v, --verbose          log every request to stderr\n"
         "  --version              print the version and exit\n"
         "  -h, --help             this text\n"
         "\n"
         "Try it:\n"
         "  %s &\n"
-        "  curl -s localhost:8080/health\n"
-        "  curl -si localhost:8080/mcp -H 'Content-Type: application/json' \\\n"
+        "  curl -s localhost:8081/health\n"
+        "  curl -si localhost:8081/mcp -H 'Content-Type: application/json' \\\n"
         "    -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":\n"
         "         {\"protocolVersion\":\"%s\",\"clientInfo\":{\"name\":\"curl\",\"version\":\"0\"},\n"
         "          \"capabilities\":{}}}'\n"
@@ -77,9 +94,12 @@ void print_usage(const char* argv0) {
         "By default echoing the Mcp-Session-Id response header is optional; clients\n"
         "that cannot retain it are served against an implicit session.\n"
         "\n"
-        "The read/write/edit/bash tools are OFF unless asked for. --fs-root confines\n"
-        "the file tools to DIR; nothing confines bash, so --allow-bash hands out a\n"
-        "shell with this process' privileges and should stay off a routable port.\n"
+        "read/write/edit are confined to --fs-root and cannot leave it, so they reach\n"
+        "only files you already own. Nothing confines bash: those commands run with\n"
+        "this process' privileges, and the default bind is every interface - which\n"
+        "makes a bare invocation a shell for anyone who can reach the port. The\n"
+        "defaults are for a machine you trust; --host 127.0.0.1, --no-bash and\n"
+        "--no-file-tools are the three ways to ask for less than that.\n"
         "\n"
         "--require-token turns this into a bearer-token resource server: a missing or\n"
         "unusable token gets 401 with a WWW-Authenticate header pointing at\n"
@@ -87,19 +107,21 @@ void print_usage(const char* argv0) {
         "issue them, and a token sent over plain HTTP is a postcard - put TLS in\n"
         "front before this listens on anything but 127.0.0.1.\n",
         ggmcp::kDefaultServerName, ggmcp::kDefaultServerVersion, program.c_str(), program.c_str(),
-        ggmcp::latest_protocol_version().c_str());
+        program.c_str(), program.c_str(), ggmcp::latest_protocol_version().c_str());
 }
 
 struct Options {
     bool stdio = false;
-    std::string host = "127.0.0.1";
-    std::uint16_t port = 8080;
+    std::string host = "0.0.0.0";
+    std::uint16_t port = 8081;
     ggmcp::HttpOptions http;
     ggmcp::SessionPolicy session_policy = ggmcp::SessionPolicy::Lenient;
     bool require_session = false;
     bool no_session = false;
-    std::string fs_root;
-    bool allow_bash = false;
+    std::string fs_root;         ///< where read/write/edit are confined; empty = no file tools
+    bool fs_root_given = false;  ///< --fs-root was typed, so its errors are the user's to see
+    bool no_file_tools = false;  ///< --no-file-tools: do not resolve a default root either
+    bool allow_bash = true;
     int bash_timeout = 30;
     bool require_token = false;
     bool token_stdin = false;
@@ -110,7 +132,7 @@ struct Options {
     std::string error;
 };
 
-/// Accepts "8080" or "127.0.0.1:8080". Leaves `host` alone for a bare port.
+/// Accepts "8081" or "127.0.0.1:8081". Leaves `host` alone for a bare port.
 bool parse_host_port(const std::string& text, std::string& host, std::uint16_t& port) {
     std::string host_text = host;
     std::string port_text = text;
@@ -119,7 +141,9 @@ bool parse_host_port(const std::string& text, std::string& host, std::uint16_t& 
     if (colon != std::string::npos) {
         host_text = text.substr(0, colon);
         port_text = text.substr(colon + 1);
-        if (host_text.empty()) host_text = "127.0.0.1";
+        // An empty host means the default one, not loopback: "--http :8081" and
+        // "--http 8081" have to bind the same address.
+        if (host_text.empty()) host_text = "0.0.0.0";
     }
 
     char* end = nullptr;
@@ -153,8 +177,26 @@ bool loopback_only(const std::string& host) {
     return host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]";
 }
 
+/// The default --fs-root: the home directory of whoever started this. $HOME
+/// when it is set, because that is what a shell means by `~`, and the passwd
+/// entry otherwise. Empty when neither can be had, in which case the file
+/// tools stay off rather than run with no root to stay inside.
+std::string default_fs_root() {
+    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') return home;
+    if (const struct passwd* entry = ::getpwuid(::getuid());
+        entry != nullptr && entry->pw_dir != nullptr && entry->pw_dir[0] != '\0') {
+        return entry->pw_dir;
+    }
+    return {};
+}
+
 Options parse_args(int argc, char** argv) {
+    // The bare-invocation defaults, so that every flag below reads as taking
+    // something away rather than granting it. The transport and tool layers
+    // keep their own conservative defaults; it is this command line that says
+    // what `ggmcp` with no arguments means.
     Options options;
+    options.http.allow_any_origin = true;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -198,11 +240,19 @@ Options parse_args(int argc, char** argv) {
         } else if (arg.rfind("--endpoint=", 0) == 0) {
             options.http.endpoint = arg.substr(13);
         } else if (arg == "--allow-origin") {
-            if (const char* v = next_value()) options.http.allowed_origins.emplace_back(v);
+            // Naming an origin is a choice, so it switches the any-Origin default
+            // off: otherwise the list would be silently ignored.
+            if (const char* v = next_value()) {
+                options.http.allowed_origins.emplace_back(v);
+                options.http.allow_any_origin = false;
+            }
         } else if (arg.rfind("--allow-origin=", 0) == 0) {
             options.http.allowed_origins.push_back(arg.substr(15));
+            options.http.allow_any_origin = false;
         } else if (arg == "--allow-any-origin") {
             options.http.allow_any_origin = true;
+        } else if (arg == "--strict-origin") {
+            options.http.allow_any_origin = false;
         } else if (arg == "--no-health") {
             options.http.enable_health_endpoint = false;
         } else if (arg == "--no-index") {
@@ -226,11 +276,25 @@ Options parse_args(int argc, char** argv) {
                 return options;
             }
         } else if (arg == "--fs-root") {
-            if (const char* v = next_value()) options.fs_root = v;
+            // --fs-root and --no-file-tools are the two halves of one decision,
+            // so whichever comes last wins.
+            if (const char* v = next_value()) {
+                options.fs_root = v;
+                options.fs_root_given = true;
+                options.no_file_tools = false;
+            }
         } else if (arg.rfind("--fs-root=", 0) == 0) {
             options.fs_root = arg.substr(10);
+            options.fs_root_given = true;
+            options.no_file_tools = false;
+        } else if (arg == "--no-file-tools") {
+            options.no_file_tools = true;
+            options.fs_root.clear();
+            options.fs_root_given = false;
         } else if (arg == "--allow-bash") {
             options.allow_bash = true;
+        } else if (arg == "--no-bash") {
+            options.allow_bash = false;
         } else if (arg == "--bash-timeout") {
             if (const char* v = next_value()) {
                 if (!parse_int(v, options.bash_timeout)) {
@@ -255,14 +319,6 @@ Options parse_args(int argc, char** argv) {
             if (const char* v = next_value()) options.auth.token_files.emplace_back(v);
         } else if (arg.rfind("--token-file=", 0) == 0) {
             options.auth.token_files.push_back(arg.substr(13));
-        } else if (arg == "--public-url") {
-            if (const char* v = next_value()) options.auth.public_url = v;
-        } else if (arg.rfind("--public-url=", 0) == 0) {
-            options.auth.public_url = arg.substr(13);
-        } else if (arg == "--authorization-server") {
-            if (const char* v = next_value()) options.auth.authorization_servers.emplace_back(v);
-        } else if (arg.rfind("--authorization-server=", 0) == 0) {
-            options.auth.authorization_servers.push_back(arg.substr(23));
         } else if (arg == "-v" || arg == "--verbose") {
             options.verbose = true;
         } else if (arg == "--version") {
@@ -297,12 +353,17 @@ Options parse_args(int argc, char** argv) {
         return options;
     }
     if (!options.require_token &&
-        (!options.auth.token_env.empty() || !options.auth.token_files.empty() || options.token_stdin ||
-         !options.auth.public_url.empty() || !options.auth.authorization_servers.empty())) {
-        options.error = "the token flags (--token-env, --token-file, --token-stdin, --public-url, "
-                        "--authorization-server) need --require-token";
+        (!options.auth.token_env.empty() || !options.auth.token_files.empty() || options.token_stdin)) {
+        options.error = "the token flags (--token-env, --token-file, --token-stdin) need --require-token";
         return options;
     }
+
+    // The default file root is the home directory, so a bare invocation offers
+    // read/write/edit over the files the person running it already owns. It is
+    // resolved here rather than in the struct because --fs-root and
+    // --no-file-tools both have to be settled first; an unresolvable home
+    // leaves the tools off, which main() reports instead of failing over.
+    if (!options.no_file_tools && !options.fs_root_given) options.fs_root = default_fs_root();
 
     if (options.http.endpoint.empty()) options.http.endpoint = "/mcp";
     if (options.http.endpoint.front() != '/') options.http.endpoint = "/" + options.http.endpoint;
@@ -332,18 +393,26 @@ int main(int argc, char** argv) {
     ggmcp::set_verbose(options.verbose);
 
     ggmcp::FileSystemOptions filesystem;
-    filesystem.enable_file_tools = !options.fs_root.empty();
     filesystem.enable_bash = options.allow_bash;
     filesystem.bash_timeout_seconds = options.bash_timeout;
     if (!options.fs_root.empty()) {
         std::error_code ec;
         const std::filesystem::path canonical = std::filesystem::canonical(options.fs_root, ec);
         if (ec) {
-            std::fprintf(stderr, "%s: --fs-root \"%s\" cannot be resolved: %s\n", ggmcp::kDefaultServerName,
-                         options.fs_root.c_str(), ec.message().c_str());
-            return 2;
+            if (options.fs_root_given) {
+                std::fprintf(stderr, "%s: --fs-root \"%s\" cannot be resolved: %s\n",
+                             ggmcp::kDefaultServerName, options.fs_root.c_str(), ec.message().c_str());
+                return 2;
+            }
+            // The root is the default, not something the operator typed: say so
+            // and serve the demo tools, rather than refusing to start over a
+            // home directory that happens to be missing.
+            ggmcp::log_line("warning: default file root \"" + options.fs_root + "\" cannot be resolved: " +
+                            ec.message() + " - the file tools are off");
+        } else {
+            filesystem.root = canonical.string();
+            filesystem.enable_file_tools = true;
         }
-        filesystem.root = canonical.string();
     }
 
     // Prepare credentials before anything listens. A server configured to demand

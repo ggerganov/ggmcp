@@ -7,7 +7,8 @@
 // The tool names mirror the ones common agent harnesses ship, but the security
 // posture is the opposite of a harness: there is no human watching this
 // process. So file access is confined to a canonicalised root, and the shell
-// stays off unless --allow-bash explicitly turns it on.
+// is its own switch: --no-bash takes it away, and the file tools can be had
+// without it.
 
 #include "ggmcp/tools.hpp"
 

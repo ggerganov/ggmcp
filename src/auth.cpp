@@ -154,13 +154,10 @@ bool TokenStore::load_file(const std::string& path, std::vector<Secret>& out, st
 bool TokenStore::prepare(const AuthOptions& options, TokenStore& store, std::string& error) {
     store.env_secrets_.clear();
     store.files_.clear();
-    store.authorization_servers_ = options.authorization_servers;
     store.realm_ = options.realm.empty() ? std::string("ggmcp") : options.realm;
     store.metadata_path_ = options.metadata_path.empty() ? std::string("/.well-known/oauth-protected-resource")
                                                         : options.metadata_path;
-    store.public_url_ = options.public_url;
     store.required_ = options.required;
-    while (store.public_url_.size() > 1 && store.public_url_.back() == '/') store.public_url_.pop_back();
 
     if (!options.required) return true;
 
@@ -316,16 +313,14 @@ std::string TokenStore::metadata_json(const std::string& resource) const {
     bearer_methods.push_back(Value("header"));
     document["bearer_methods_supported"] = Value(std::move(bearer_methods));
 
-    Array servers;
-    for (const std::string& url : authorization_servers_) servers.push_back(Value(url));
-    // Absent rather than empty on purpose. ggmcp is not an authorization server:
-    // it mints nothing, so there is nothing to advertise unless the operator
-    // named a real one. A client that insists on full OAuth discovery will not
-    // get anywhere here, which is the honest answer.
-    if (!servers.empty()) document["authorization_servers"] = Value(std::move(servers));
-
-    // No scopes_supported: this server does not enforce scopes, and advertising
-    // ones it ignores would be a claim the code does not keep.
+    // No authorization_servers: ggmcp is not an authorization server, it mints
+    // nothing, and it does not point at anything that does. A client that
+    // insists on completing full OAuth discovery against this document gets
+    // nowhere, which is the honest answer rather than a signpost this process
+    // cannot keep.
+    //
+    // No scopes_supported either: this server does not enforce scopes, and
+    // advertising ones it ignores would be a claim the code does not keep.
     return dump(Value(std::move(document)));
 }
 

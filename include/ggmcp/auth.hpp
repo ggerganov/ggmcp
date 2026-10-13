@@ -10,14 +10,15 @@
 //   * a request arrives with `Authorization: Bearer <token>`
 //   * if it is missing or unusable, answer 401 with a `WWW-Authenticate`
 //     header pointing at protected-resource metadata (RFC 9728)
-//   * the metadata names the authorization servers that mint those tokens
+//   * that document says what this server accepts and where it lives, and
+//     nothing else - no authorization_servers, no scopes_supported
 //
 // The other half - an authorization server that issues, expires and revokes
-// tokens, with PKCE and dynamic client registration - is deliberately NOT here.
-// ggmcp never mints a token and never talks to an authorization server; it only
-// checks presented secrets against a list it was handed at startup. Point
-// --authorization-server at a real one and the discovery document will say so,
-// but nothing here enforces what that server says.
+// tokens, with PKCE and dynamic client registration - is deliberately NOT here,
+// and ggmcp does not even point at one. It never mints a token and never talks
+// to an authorization server; it only checks presented secrets against a list
+// it was handed at startup, and the discovery document claims nothing beyond
+// what this process actually does.
 //
 // Which leaves the caveat that matters: a static bearer token over plain HTTP is
 // a postcard. It travels in clear text on every request, so this whole module is
@@ -69,16 +70,6 @@ struct AuthOptions {
 
     /// Path of the protected-resource metadata document, per RFC 9728.
     std::string metadata_path = "/.well-known/oauth-protected-resource";
-
-    /// Authorization servers to advertise. Names only - this server does not
-    /// contact them.
-    std::vector<std::string> authorization_servers;
-
-    /// Absolute base URL to advertise in the metadata document, e.g.
-    /// "https://mcp.example.com". Set this when a reverse proxy fronts the
-    /// server; otherwise the request's Host header is used, falling back to the
-    /// bound address.
-    std::string public_url;
 };
 
 /// Who a request arrived as. Carries a label for logs and tools, never secret
@@ -124,10 +115,9 @@ public:
     bool required() const { return required_; }
     std::size_t size() const;
 
-    /// Path the metadata document is served from, and the base URL to advertise
-    /// it under (empty means "derive it from the request").
+    /// Path the metadata document is served from. The URL it is advertised
+    /// under is derived per request, from the Host header or the bound address.
     const std::string& metadata_path() const { return metadata_path_; }
-    const std::string& public_url() const { return public_url_; }
 
     /// Decides whether `request` may proceed.
     ///
@@ -174,10 +164,8 @@ private:
 
     std::vector<Secret> env_secrets_;
     mutable std::vector<FileSource> files_;
-    std::vector<std::string> authorization_servers_;
     std::string realm_ = "ggmcp";
     std::string metadata_path_ = "/.well-known/oauth-protected-resource";
-    std::string public_url_;
     bool required_ = false;
 };
 

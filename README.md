@@ -7,15 +7,16 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server in C++17, ser
 library. Nothing is downloaded at build time.
 
 Verified against a real MCP client: `pi mcp list` reports
-`ggmcp: connected, 4 tools` against this binary — or 8 with the file and shell tools
-switched on. With `--require-token` the same client reports
+`ggmcp: connected, 8 tools` against this binary as it comes up — the four demo tools plus
+`read`, `write`, `edit` and `bash` — and `4 tools` when started with
+`--no-file-tools --no-bash`. With `--require-token` the same client reports
 `MCP server requires authentication` when it brings no token, which is the entire point of
 that response.
 
 ```
 $ make && make test
 ...
-100% tests passed out of 2          # 328 in-process checks + 301 live wire checks
+100% tests passed out of 2          # 325 in-process checks + 350 live wire checks
 ```
 
 ## Why C++ is a reasonable choice here
@@ -51,15 +52,24 @@ in `vendor/`, so the build needs no network access and no package manager.
 ## Run
 
 ```bash
-./build/ggmcp                       # HTTP on http://127.0.0.1:8080/mcp
-./build/ggmcp --http 0.0.0.0:9000   # explicit host and port
-./build/ggmcp --port 0 --verbose    # ephemeral port, log every request to stderr
-./build/ggmcp --no-session          # stateless: never issues a session id
-./build/ggmcp --stdio               # newline-delimited JSON-RPC on stdin/stdout
-./build/ggmcp --fs-root ./work      # + read/write/edit, confined to ./work
-./build/ggmcp --fs-root ./work --allow-bash   # + a real shell (read Security first)
-GGMCP_TOKEN=… ./build/ggmcp --require-token    # + bearer-token auth (read Authorization first)
+./build/ggmcp                 # HTTP on http://0.0.0.0:8081/mcp, all eight tools,
+                              # file tools rooted at $HOME, any Origin accepted
+./build/ggmcp --host 127.0.0.1                # loopback only
+./build/ggmcp --no-file-tools --no-bash        # the four demo tools and nothing else
+./build/ggmcp --strict-origin                  # DNS-rebinding guard: Origin must be this port
+./build/ggmcp --http 127.0.0.1:9000            # explicit host and port
+./build/ggmcp --port 0 --verbose               # ephemeral port, log every request to stderr
+./build/ggmcp --no-session                     # stateless: never issues a session id
+./build/ggmcp --stdio                          # newline-delimited JSON-RPC on stdin/stdout
+./build/ggmcp --fs-root ./work                 # file tools rooted at ./work instead of ~
+GGMCP_TOKEN=… ./build/ggmcp --require-token     # + bearer-token auth (read Authorization first)
 ```
+
+Bare `./build/ggmcp` is exactly
+`--host 0.0.0.0 --port 8081 --allow-bash --fs-root ~ --allow-any-origin`, and each half of
+that has a counterpart that takes it away: `--host`, `--port`, `--no-bash`,
+`--no-file-tools` (or another `--fs-root`), `--strict-origin`. The defaults are the
+convenient ones — [Security](#security) is where to read what they cost.
 
 Both transports feed the *same* dispatcher, so tool behaviour cannot drift between them.
 
@@ -103,14 +113,18 @@ Always on:
 | `utc_now` | — | `{"iso8601": ..., "weekday": ..., "epochMillis": ...}` |
 | `whoami` | — | transport, session id, peer address, clientInfo |
 
-Off until you ask, because they are the ones with consequences:
+On by default, and the ones with consequences:
 
-| Tool | Flag | Arguments | Returns |
+| Tool | Switch that takes it away | Arguments | Returns |
 | --- | --- | --- | --- |
-| `read` | `--fs-root DIR` | `path` (required), `offset?`, `limit?` | the file, or a line slice plus a "lines 4-12 of 40" marker |
-| `write` | `--fs-root DIR` | `path`, `content` (required), `append?` | `wrote N bytes to <resolved path>`; creates parents |
-| `edit` | `--fs-root DIR` | `path`, `edits[]` of `{oldText, newText?}` | `applied N edits … (before -> after bytes)` |
-| `bash` | `--allow-bash` | `command` (required), `timeout?` | merged stdout+stderr; non-zero exit is `isError` |
+| `read` | `--no-file-tools` | `path` (required), `offset?`, `limit?` | the file, or a line slice plus a "lines 4-12 of 40" marker |
+| `write` | `--no-file-tools` | `path`, `content` (required), `append?` | `wrote N bytes to <resolved path>`; creates parents |
+| `edit` | `--no-file-tools` | `path`, `edits[]` of `{oldText, newText?}` | `applied N edits … (before -> after bytes)` |
+| `bash` | `--no-bash` | `command` (required), `timeout?` | merged stdout+stderr; non-zero exit is `isError` |
+
+The three file tools are rooted at `--fs-root`, which defaults to your home directory:
+another `--fs-root DIR` re-roots them, and `--fs-root` and `--no-file-tools` are
+last-one-wins on the command line. `bash` is rooted nowhere — see Confinement below.
 
 They mirror the tool names agent harnesses ship, so a client can point at them without
 learning a new vocabulary. The semantics that matter:
@@ -136,10 +150,12 @@ it is also what lets a symlink you planted inside the root point straight out of
 are refused, and the refusal never echoes the file's contents back.
 
 It does not buy you anything against `bash`, which is a shell and can `cd` anywhere. That is
-why `--allow-bash` is a separate flag: `--fs-root` confines the file tools, and only
-explicitly opting out of that default hands out a shell. `--fs-root DIR` must name a
-directory that already exists — a typo in a security boundary should fail loudly at startup
-rather than create the typo.
+why the two have always been separate switches, and why they are separate now: `--fs-root`
+confines `read`/`write`/`edit` and nothing else, while `--no-bash` is the single switch that
+takes the shell away. `--fs-root DIR` must name a directory that already exists — a typo in a
+security boundary should fail loudly at startup rather than create the typo. The *default*
+root is your home directory rather than something you typed, so it is not fatal if it cannot
+be resolved: the file tools are dropped with a warning instead of running unconfinable.
 
 ## Authorization — the half a resource server can honestly implement
 
@@ -150,7 +166,7 @@ when that token is missing or unusable it answers
 HTTP/1.1 401 Unauthorized
 WWW-Authenticate: Bearer realm="ggmcp", error="invalid_request",
   error_description="no Authorization header was sent",
-  resource_metadata="http://127.0.0.1:8080/.well-known/oauth-protected-resource"
+  resource_metadata="http://127.0.0.1:8081/.well-known/oauth-protected-resource"
 ```
 
 which is the shape RFC 6750 and RFC 9728 describe and the shape a spec-following MCP client
@@ -178,12 +194,12 @@ variable it looked for, because finding out by being locked out is not finding o
 
 What is **not** here, on purpose: ggmcp never issues a token and has no expiry, no revocation
 list, no scopes, no PKCE and no dynamic client registration. That is the authorization
-server's job and the spec's answer to "I need those" is *put a real one in front*.
-`--authorization-server https://auth.example` advertises one in the metadata document so
-clients can discover it; nothing here contacts it. So a client that insists on completing full
-OAuth discovery against a bare `--require-token` server will get nowhere, which is the honest
-answer — inventing an `authorization_servers` entry that points back at ggmcp would be a claim
-the code does not keep. Likewise no `scopes_supported`: this server enforces no scopes, so it
+server's job and the spec's answer to "I need those" is *put a real one in front*. ggmcp does
+not even advertise one — there is no flag for it: the metadata document says what this server
+accepts and where it lives, and nothing else, because an `authorization_servers` entry would
+be a claim the code does not keep. So a client that insists on completing full OAuth
+discovery against a bare `--require-token` server will get nowhere, which is the honest
+answer. The same goes for `scopes_supported`: this server enforces no scopes, so it
 advertises none.
 
 Two properties are worth naming outright:
@@ -208,7 +224,7 @@ Under the default policy the session header is optional, so the shortest useful 
 is just:
 
 ```bash
-curl -s localhost:8080/mcp -H 'Content-Type: application/json' \
+curl -s localhost:8081/mcp -H 'Content-Type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
@@ -216,18 +232,18 @@ The full handshake, when you want a real session:
 
 ```bash
 # 1. initialize — capture the Mcp-Session-Id from the response headers
-curl -si localhost:8080/mcp -H 'Content-Type: application/json' -d '{
+curl -si localhost:8081/mcp -H 'Content-Type: application/json' -d '{
   "jsonrpc": "2.0", "id": 1, "method": "initialize",
   "params": {"protocolVersion": "2025-06-18",
              "clientInfo": {"name": "curl", "version": "0"}, "capabilities": {}}}'
 
 # 2. end the handshake (202 Accepted, empty body by spec)
-curl -si localhost:8080/mcp -H 'Content-Type: application/json' \
+curl -si localhost:8081/mcp -H 'Content-Type: application/json' \
      -H 'Mcp-Session-Id: <id>' -H 'MCP-Protocol-Version: 2025-06-18' \
      -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
 # 3. list and call tools
-curl -s localhost:8080/mcp -H 'Content-Type: application/json' \
+curl -s localhost:8081/mcp -H 'Content-Type: application/json' \
      -H 'Mcp-Session-Id: <id>' -H 'MCP-Protocol-Version: 2025-06-18' \
      -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
           "params":{"name":"hello","arguments":{"name":"Ada","loud":true}}}'
@@ -251,14 +267,16 @@ write an MCP request.
 | `GET /health` | `200` JSON status (`401` under `--require-token`) |
 | `GET /.well-known/oauth-protected-resource` | `200` metadata, no token required; `404` when auth is off |
 | unknown path | `404` JSON |
+| `POST /mcp` carrying a foreign `Origin` | `200` (any Origin is the default) · `403` under `--strict-origin` |
 | any of the above with a missing or unusable token under `--require-token` | `401` + `WWW-Authenticate` |
 
 JSON-RPC-level failures (`-32601` unknown method, `-32602` unknown tool, tool `isError`)
 deliberately go out at **HTTP 200** with the detail in the body, so clients display the
 message rather than a bare status line. Non-2xx is reserved for transport-level problems:
 unparseable JSON (`400`), batching (`400`), bad `MCP-Protocol-Version` (`400`), missing or
-unusable token (`401`, where `WWW-Authenticate` is the whole point of the response), foreign
-`Origin` (`403`), unknown session (`404`), unusable `Accept` (`406`), bad `Content-Type`
+unusable token (`401`, where `WWW-Authenticate` is the whole point of the response), a
+foreign `Origin` under `--strict-origin` (`403`), unknown session (`404`), unusable `Accept`
+(`406`), bad `Content-Type`
 (`415`). A `401` also carries `Cache-Control: no-store` and `X-Content-Type-Options:
 nosniff`, and its body quotes no token — neither the one tried nor, by omission, a real one.
 
@@ -267,23 +285,23 @@ nosniff`, and its body quotes no token — neither the one tried nor, by omissio
 pi:
 
 ```bash
-pi mcp add ggmcp --url http://127.0.0.1:8080/mcp --description "C++ MCP server"
-pi mcp list      # ggmcp: connected, 4 tools   (8 with --fs-root + --allow-bash)
+pi mcp add ggmcp --url http://127.0.0.1:8081/mcp --description "C++ MCP server"
+pi mcp list      # ggmcp: connected, 8 tools   (4 with --no-file-tools --no-bash)
 ```
 
 Against a `--require-token` server, hand pi the same token by name:
 
 ```bash
 export GGMCP_TOKEN=…
-pi mcp add ggmcp --url http://127.0.0.1:8080/mcp --bearer-token-env-var GGMCP_TOKEN
-pi mcp list                       # connected, 4 tools
+pi mcp add ggmcp --url http://127.0.0.1:8081/mcp --bearer-token-env-var GGMCP_TOKEN
+pi mcp list                       # connected, 8 tools
 env -u GGMCP_TOKEN pi mcp list    # MCP server requires authentication
 ```
 
 Any client that speaks streamable HTTP takes the same shape:
 
 ```json
-{ "mcpServers": { "ggmcp": { "url": "http://127.0.0.1:8080/mcp" } } }
+{ "mcpServers": { "ggmcp": { "url": "http://127.0.0.1:8081/mcp" } } }
 ```
 
 A stdio-spawned variant avoids needing a running server first:
@@ -328,7 +346,8 @@ python3 tests/http_roundtrip.py ./build/ggmcp
 The integration test is deliberately paranoid about the parts of HTTP that break silently:
 it asserts the `202`-with-no-body notification rule, session issuance and teardown, all
 three session policies end to end (including the cold `tools/list` a naive client sends),
-rejection of conflicting flags, `Origin` rejection of `http://evil.example`,
+rejection of conflicting flags, `Origin` accepted by default and rejected as
+`http://evil.example` under `--strict-origin`,
 `Accept`/`Content-Type` negotiation, id echoing, three requests over one keep-alive
 connection, and a `Transfer-Encoding: chunked` request body reassembled in seven-byte
 chunks. It also checks that non-ASCII (`café 🚀`, tabs, newlines) survives the round trip
@@ -341,8 +360,10 @@ round trip on a scratch tree; `edit`'s all-or-nothing behaviour confirmed by che
 bytes on disk after a failed multi-edit call; and `bash` exit codes, stderr merging, timeouts
 and backgrounded grandchildren. On the wire: the same calls through real HTTP, plus that a
 refused traversal leaks no contents, that `../escape.txt` really does not appear outside the
-root, that a timeout comes back in about a second, and that with no flags sent at all the
-four file/shell tools are unknown tools (`-32602`), not merely hidden.
+root, that a timeout comes back in about a second, and that the switches really do remove
+what they name: with `--no-file-tools --no-bash` all four are unknown tools (`-32602`), not
+merely hidden, while a bare invocation offers all eight — on every interface, with the
+`Origin` check off, which is asserted too.
 
 Authorization is checked at both levels too. In-process: `constant_time_equals` on empty,
 prefix, superstring and last-byte-differs inputs; token loading from a literal and from a file
@@ -352,9 +373,9 @@ valid bearer header*; rotation taking effect mid-test; a vanished token file kee
 it held; and `www_authenticate` built from a realm containing a quote, asserting the quote
 comes back escaped rather than as an injected parameter. On the wire: the 401 handshake
 including `WWW-Authenticate`, `Cache-Control` and `X-Content-Type-Options`, both exempt routes,
-`/health` and `/` gated, `--public-url` changing what is advertised, two tokens both honoured,
-a revoked token failing and its replacement working without a restart, and eight
-misconfigurations that must exit `2` with the variable or file they object to named.
+`/health` and `/` gated, two tokens both honoured, a revoked token failing and its replacement
+working without a restart, and seven misconfigurations that must exit `2` with the variable or
+file they object to named.
 
 And against a real client: `pi mcp add … --bearer-token-env-var GGMCP_TOKEN` reports
 `connected, 4 tools` with the token in the environment and `MCP server requires
@@ -381,21 +402,29 @@ design:
 
 ## Security
 
-Bind to loopback unless something is terminating TLS in front of you: this is plain HTTP
-with no authentication of its own. `Origin` is validated against the bound port when a
-browser sends one (DNS-rebinding protection, per spec); `--allow-any-origin` turns that
-off and you should have a reason. `--host 0.0.0.0` is opt-in, not the default.
+**Read this before running the default.** The defaults are the convenient ones, not the
+careful ones: a bare `ggmcp` binds `0.0.0.0:8081`, roots `read`/`write`/`edit` at your home
+directory, runs `bash` with this process' privileges, and accepts any `Origin`. That is one
+command to a working server — and it is also an unauthenticated remote file write and remote
+code execution as whoever started it, for anyone who can reach the port. `Origin` buys
+nothing against that: browsers send the header, and `curl` and every script on the network
+simply omit it.
 
-Then multiply the stakes by the file and shell tools. An unauthenticated HTTP server that
-exposes `write` is a remote file-write primitive; with `--allow-bash` it is unauthenticated
-remote code execution as whoever started the process, and `Origin` will not save you — that
-header is only sent by browsers, so any `curl` or script on the network simply omits it.
-Which is why the defaults are: no file tools, no shell, no authorization, loopback only, and
-`--fs-root` requiring a directory that already exists. Treat `--allow-bash` on a non-loopback
-bind as "this machine is in the blast radius", and put a real authenticating proxy in front if
-that is what you actually want.
+If that is not what you meant, the tightened form is one line:
 
-`--require-token` is the cheapest thing between that sentence and reality, and the easiest to
+```bash
+ggmcp --host 127.0.0.1 --no-file-tools --no-bash --strict-origin
+```
+
+Loopback only, the four demo tools, and the DNS-rebinding guard back on (`Origin` validated
+against the bound port when a browser sends one, per spec). Two things hold either way:
+`--fs-root` must name a directory that already exists — a typo in a security boundary should
+fail loudly at startup rather than create the typo — and the file tools are confined to it
+and cannot leave, whatever it points at. Put a real authenticating proxy in front if you want
+more than that, and do not bind `0.0.0.0` without something terminating TLS in front of you:
+this is plain HTTP with no authentication of its own.
+
+`--require-token` is the cheapest next step after that line, and the easiest to
 over-rate. A bearer token over **plain HTTP is a postcard**: it travels in clear text on every
 request, so anyone who can watch the traffic has it permanently — there is no expiry to wait
 out and nothing to revoke short of rewriting the token file. On loopback that is fine, because
@@ -403,8 +432,8 @@ the traffic is not in reach; anywhere else TLS is not optional. And a token is a
 not an identity: every holder gets the same tools, the log can only say which of your own
 entries let them in (`env:GGMCP_TOKEN`, `tokens.txt:3`), and one leaked token is one leaked
 token for everybody. If you need to know *who* called, or to cut one caller off while leaving
-the rest, that is the authorization-server-shaped hole described above — go get a real one and
-point `--authorization-server` at it.
+the rest, that is the authorization-server-shaped hole described above — ggmcp does not fill
+it and does not pretend to, so go get a real one and put it in front.
 
 ## License
 

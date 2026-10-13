@@ -785,23 +785,11 @@ void test_token_store() {
     hostile.required = true;
     hostile.token_literal = secret;
     hostile.realm = "evil\", error=\"injected";
-    hostile.public_url = "https://proxy.example/base/";
     ggmcp::TokenStore hostile_store;
     check(ggmcp::TokenStore::prepare(hostile, hostile_store, error), "a hostile realm still loads");
-    check_eq(hostile_store.public_url(), "https://proxy.example/base", "the public URL loses its trailing slash");
     const std::string escaped = hostile_store.www_authenticate("/.well-known/x", "invalid_request", "d");
     check(!contains(escaped, "error=\"injected\""), "a quote in the realm cannot inject a parameter");
     check_has(escaped, "\\\"", "and is escaped instead");
-
-    ggmcp::AuthOptions with_as;
-    with_as.required = true;
-    with_as.token_literal = secret;
-    with_as.authorization_servers = {"https://auth.example"};
-    ggmcp::TokenStore as_store;
-    check(ggmcp::TokenStore::prepare(with_as, as_store, error), "an authorization server can be named");
-    check_has(as_store.metadata_json("http://h/mcp"), "https://auth.example", "and is advertised verbatim");
-    check(as_store.authorize(auth_request("/mcp", "Bearer " + secret)).ok,
-          "naming one does not change what this server accepts");
 }
 
 void test_authorization_handler() {

@@ -22,6 +22,13 @@ import time
 
 LATEST = "2025-06-18"
 
+# Tool names, sorted the way the assertions compare them. DEMO_TOOLS is what
+# a server offers when the file and shell tools are switched off; the bare
+# invocation adds read/write/edit (rooted at $HOME) and bash, because that is
+# what `ggmcp` with no flags now means.
+DEMO_TOOLS = ["echo", "hello", "utc_now", "whoami"]
+DEFAULT_TOOLS = ["bash", "echo", "edit", "hello", "read", "utc_now", "whoami", "write"]
+
 checks = 0
 failures = []
 
@@ -201,7 +208,7 @@ def test_health(host, port, path):
     check(isinstance(body, dict), "health body is JSON")
     if isinstance(body, dict):
         check_eq(body.get("status"), "ok", "health reports ok")
-        check_eq(len(body.get("tools", [])), 4, "health lists four tools")
+        check_eq(sorted(body.get("tools", [])), DEFAULT_TOOLS, "health lists the default tools")
         check_eq(body.get("server"), "ggmcp", "health names the server")
         check_eq(body.get("endpoint"), "/mcp", "health names the endpoint")
 
@@ -221,7 +228,7 @@ def test_rejects_before_handshake(host, port, path):
     # server. Strict-mode assertions live in test_session_policies().
     status, _, body = post(host, port, path, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     check_eq(status, 200, "tools/list without a session is served by default")
-    check_eq(len(body["result"]["tools"]), 4, "and it returns the four tools")
+    check_eq(len(body["result"]["tools"]), len(DEFAULT_TOOLS), "and it returns every default tool")
 
     status, _, body = post(host, port, path, "{ this is not json")
     check_eq(status, 400, "unparseable body is 400")
@@ -267,9 +274,9 @@ def test_tools_list(host, port, path, session):
     status, _, body = post(host, port, path, {"jsonrpc": "2.0", "id": 4, "method": "tools/list"}, session=session)
     check_eq(status, 200, "tools/list status")
     tools = body["result"]["tools"]
-    check_eq(len(tools), 4, "four tools")
+    check_eq(len(tools), len(DEFAULT_TOOLS), "eight tools")
     # The server lists tools in registration order, so compare as a set.
-    check_eq(sorted(tool["name"] for tool in tools), ["echo", "hello", "utc_now", "whoami"], "tool names")
+    check_eq(sorted(tool["name"] for tool in tools), DEFAULT_TOOLS, "tool names")
     for tool in tools:
         schema = tool["inputSchema"]
         check_eq(schema["type"], "object", f'{tool["name"]} schema type')
@@ -361,9 +368,12 @@ def test_ping_and_unknown_method(host, port, path, session):
                         headers={"MCP-Protocol-Version": LATEST}, session=session)
     check_eq(status, 200, "a supported MCP-Protocol-Version is accepted")
 
+    # Accepting any Origin is the default (it is what lets a browser page drive
+    # this server); the 403 for a foreign one is asserted under --strict-origin
+    # in test_origin_policies(), where it is actually configured to happen.
     status, _, _ = post(host, port, path, {"jsonrpc": "2.0", "id": 14, "method": "ping"},
                         headers={"Origin": "http://evil.example"}, session=session)
-    check_eq(status, 403, "a foreign Origin is 403")
+    check_eq(status, 200, "a foreign Origin is accepted by default")
 
     status, _, _ = post(host, port, path, {"jsonrpc": "2.0", "id": 15, "method": "ping"},
                         headers={"Origin": f"http://localhost:{port}"}, session=session)
@@ -487,7 +497,7 @@ def test_session_policies(binary):
 
         status, _, body = post(host, port, path, list_req)
         check_eq(status, 200, "tools/list with no session id is served")
-        check_eq(len(body["result"]["tools"]), 4, "the sessionless list has four tools")
+        check_eq(len(body["result"]["tools"]), len(DEFAULT_TOOLS), "the sessionless list has eight tools")
 
         status, _, body = post(host, port, path, list_req, session="not-a-real-session")
         check_eq(status, 200, "tools/list with an unknown session id is served")
@@ -530,7 +540,7 @@ def test_session_policies(binary):
         post(host, port, path, {"jsonrpc": "2.0", "method": "notifications/initialized"}, session=session)
         status, _, body = post(host, port, path, list_req, session=session)
         check_eq(status, 200, "strict serves tools/list after the handshake")
-        check_eq(len(body["result"]["tools"]), 4, "the strict list has four tools")
+        check_eq(len(body["result"]["tools"]), len(DEFAULT_TOOLS), "the strict list has eight tools")
 
         request_raw("DELETE", host, port, path, session=session)
         status, _, _ = post(host, port, path, {"jsonrpc": "2.0", "id": 6, "method": "ping"}, session=session)
@@ -548,7 +558,7 @@ def test_session_policies(binary):
 
         status, _, body = post(host, port, path, list_req)
         check_eq(status, 200, "stateless serves tools/list")
-        check_eq(len(body["result"]["tools"]), 4, "the stateless list has four tools")
+        check_eq(len(body["result"]["tools"]), len(DEFAULT_TOOLS), "the stateless list has eight tools")
 
         status, _, _ = request_raw("DELETE", host, port, path, session="anything")
         check_eq(status, 405, "stateless refuses DELETE - there is no session to close")
@@ -572,6 +582,15 @@ def test_flag_validation(binary):
         check_eq(process.returncode, 0, f"{flag} --help exits 0")
         check_has(process.stdout, "--session-policy", "--help documents --session-policy")
 
+    # The defaults are part of the interface, and --help is where a caller
+    # reads them before deciding what to switch off.
+    code, out, _ = run_command(binary, ["--help"])
+    check_eq(code, 0, "--help exits 0")
+    check_has(out, "0.0.0.0:8081", "--help documents the default bind")
+    check_has(out, "--no-file-tools", "--help documents --no-file-tools")
+    check_has(out, "--no-bash", "--help documents --no-bash")
+    check_has(out, "--strict-origin", "--help documents --strict-origin")
+
     # The file and shell tools need their own kind of validation: a root that
     # cannot be resolved must stop the server rather than quietly widen the scope.
     with tempfile.TemporaryDirectory(prefix="ggmcp-flag-") as root:
@@ -586,8 +605,9 @@ def test_flag_validation(binary):
             check_eq(process.returncode, 2, f"{' '.join(args)} exits 2")
             check_has(process.stderr, want, f"the error for {' '.join(args)}")
 
-        # An existing root starts fine and says so in the banner.
-        with Server(binary, ["--http", "127.0.0.1:0", "--fs-root", root]) as server:
+        # An existing root starts fine and says so in the banner. bash is on by
+        # default, so it takes --no-bash to get a server without a shell in it.
+        with Server(binary, ["--http", "127.0.0.1:0", "--fs-root", root, "--no-bash"]) as server:
             host, port, path = server.wait_for_port()
             check_has(server.wait_for_log(r"file tools confined to").group(0), "file tools confined to",
                       "--fs-root logs the root")
@@ -595,7 +615,17 @@ def test_flag_validation(binary):
             check_eq(sorted(health.get("tools", [])),
                      ["echo", "edit", "hello", "read", "utc_now", "whoami", "write"],
                      "--fs-root advertises seven tools")
-            check("bash" not in health.get("tools", []), "--fs-root alone does not enable bash")
+            check("bash" not in health.get("tools", []), "--no-bash keeps the shell out")
+
+        # --fs-root and --no-file-tools are the two halves of one decision, so
+        # the last one typed is the one that stands.
+        for args, present in ((["--no-file-tools", "--fs-root", root], True),
+                              (["--fs-root", root, "--no-file-tools"], False)):
+            with Server(binary, ["--http", "127.0.0.1:0", *args]) as server:
+                host, port, path = server.wait_for_port()
+                _, _, health = get_json(host, port, "/health")
+                check_eq("read" in health.get("tools", []), present,
+                         f"{' '.join(args)} leaves read {'' if present else 'out of '}the list")
 
 
 def tool_text(host, port, path, session, name, arguments):
@@ -720,16 +750,78 @@ def test_filesystem_tools(binary):
             check(is_error, "an out-of-range timeout is rejected")
 
 
-def test_tools_off_by_default(binary):
-    """Without --fs-root / --allow-bash the file and shell tools must not exist."""
-    print("\n== file tools are off by default ==")
-    with Server(binary, ["--http", "127.0.0.1:0"]) as server:
+def test_default_tools(binary):
+    """A bare invocation offers the file and shell tools; --no-* take them back."""
+    print("\n== tool defaults ==")
+    # --port 0 keeps the default host (every interface) without squatting on the
+    # default port, which may already have a ggmcp of the user's on it.
+    with Server(binary, ["--port", "0"]) as server:
+        host, port, path = server.wait_for_port()
+        check_eq(host, "0.0.0.0", "the default bind is every interface")
+        check_has(server.wait_for_log(r"file tools confined to").group(0), "file tools confined to",
+                  "the default file root is logged")
+        check_has(server.wait_for_log(r"bash is ENABLED").group(0), "bash is ENABLED",
+                  "bash is on without being asked for")
+        session = test_handshake(host, port, path)
+        status, _, body = post(host, port, path, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                               session=session)
+        check_eq(status, 200, "the default server answers tools/list")
+        check_eq(sorted(tool["name"] for tool in body["result"]["tools"]), DEFAULT_TOOLS,
+                 "the bare server offers eight tools")
+
+    # Each switch takes away exactly what it names, and nothing else.
+    for args, want in (
+        (["--no-file-tools"], ["bash", *DEMO_TOOLS]),
+        (["--no-bash"], ["echo", "edit", "hello", "read", "utc_now", "whoami", "write"]),
+        (["--no-file-tools", "--no-bash"], DEMO_TOOLS),
+    ):
+        with Server(binary, ["--port", "0", *args]) as server:
+            host, port, path = server.wait_for_port()
+            _, _, health = get_json(host, port, "/health")
+            check_eq(sorted(health.get("tools", [])), want,
+                     f"{' '.join(args)} leaves exactly {len(want)} tools")
+            if "--no-file-tools" in args:
+                check(not any("file tools confined to" in line for line in server.log),
+                      "--no-file-tools does not even resolve the default root")
+
+    # And a tool that was switched off is a tool that does not exist.
+    with Server(binary, ["--port", "0", "--no-file-tools", "--no-bash"]) as server:
         host, port, path = server.wait_for_port()
         session = test_handshake(host, port, path)
         for name in ("read", "write", "edit", "bash"):
             status, _, body = call_tool(host, port, path, session, name, {"path": "a.txt", "command": "echo"})
             check_eq(status, 200, f"{name} is not reachable at the HTTP layer")
             check_eq(body["error"]["code"], -32602, f"{name} is an unknown tool")
+
+
+def test_origin_policies(binary):
+    """Any-Origin is the default; --strict-origin and --allow-origin take it back."""
+    print("\n== origin policies ==")
+
+    def ping_with_origin(host, port, path, origin, session):
+        status, _, _ = post(host, port, path, {"jsonrpc": "2.0", "id": 30, "method": "ping"},
+                            headers={"Origin": origin}, session=session)
+        return status
+
+    with Server(binary, ["--port", "0", "--strict-origin"]) as server:
+        host, port, path = server.wait_for_port()
+        session = test_handshake(host, port, path)
+        check_eq(ping_with_origin(host, port, path, f"http://localhost:{port}", session), 200,
+                 "strict accepts loopback on the bound port")
+        check_eq(ping_with_origin(host, port, path, f"http://127.0.0.1:{port}", session), 200,
+                 "strict accepts 127.0.0.1 on the bound port")
+        check_eq(ping_with_origin(host, port, path, "http://evil.example", session), 403,
+                 "strict rejects a foreign origin")
+
+    # Naming an origin implies strict: otherwise the list would be dead
+    # configuration against the any-Origin default.
+    with Server(binary, ["--port", "0", "--allow-origin", "http://good.example"]) as server:
+        host, port, path = server.wait_for_port()
+        session = test_handshake(host, port, path)
+        check_eq(ping_with_origin(host, port, path, "http://good.example", session), 200,
+                 "a named origin is accepted")
+        check_eq(ping_with_origin(host, port, path, "http://evil.example", session), 403,
+                 "naming one origin turns the any-Origin default off")
 
 
 def test_stdio(binary):
@@ -756,7 +848,8 @@ def test_stdio(binary):
     # proves the notification was not answered.
     send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     reply = receive()
-    check_eq(len(reply["result"]["tools"]), 4, "stdio tools/list")
+    check_eq(sorted(tool["name"] for tool in reply["result"]["tools"]), DEFAULT_TOOLS,
+             "stdio tools/list carries the default tools")
 
     send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
           "params": {"name": "hello", "arguments": {"name": "stdio"}}})
@@ -839,7 +932,7 @@ def test_authorization(binary):
             # --- a good token works everywhere a bad one fails ----------------
             status, _, body = post(host, port, path, tools_list, headers=bearer)
             check_eq(status, 200, "a valid token is accepted")
-            check_eq(len(body["result"]["tools"]), 4, "a valid token sees the tools")
+            check_eq(len(body["result"]["tools"]), len(DEFAULT_TOOLS), "a valid token sees the tools")
 
             status, headers, _ = initialize(host, port, path)
             check_eq(status, 401, "initialize without a token is refused")
@@ -915,28 +1008,6 @@ def test_authorization(binary):
                 status, _, _ = post(host, port, path, tools_list, headers={"Authorization": f"Bearer {token}"})
                 check_eq(status, 200, f"each configured token works ({token[:6]}...)")
 
-        # --- --public-url: what a reverse-proxy deployment advertises ------
-        with Server(binary, ["--http", "127.0.0.1:0", "--require-token", "--token-file", two_tokens,
-                             "--public-url", "https://proxy.example/mcp/"]) as server:
-            host, port, path = server.wait_for_port()
-            status, headers, _ = post(host, port, path, tools_list)
-            check_eq(status, 401, "the proxied server still refuses anonymous calls")
-            check_has(headers.get("www-authenticate", ""), 'resource_metadata="https://proxy.example/mcp' + metadata_path,
-                      "the challenge advertises the public base URL, not the bound one")
-            _, _, document = get_json(host, port, metadata_path)
-            check_eq(document.get("resource"), "https://proxy.example/mcp" + path,
-                     "the metadata document advertises the public base URL")
-
-        # --- --authorization-server is advertised, and nothing more --------
-        with Server(binary, ["--http", "127.0.0.1:0", "--require-token", "--token-file", two_tokens,
-                             "--authorization-server", "https://auth.example"]) as server:
-            host, port, path = server.wait_for_port()
-            _, _, document = get_json(host, port, metadata_path)
-            check_eq(document.get("authorization_servers"), ["https://auth.example"],
-                     "a configured authorization server is advertised")
-            status, _, _ = post(host, port, path, tools_list, headers={"Authorization": f"Bearer {good}"})
-            check_eq(status, 200, "advertising an authorization server does not change the check")
-
         # --- --token-stdin: a secret that never touched argv ---------------
         reader, writer = os.pipe()
         os.write(writer, (good + "\n").encode())
@@ -973,8 +1044,6 @@ def test_authorization(binary):
             (["--require-token", "--token-file", os.path.join(root, "empty.txt")], None, None,
              "contains no tokens"),
             (["--token-file", token_file], None, None, "--require-token"),
-            (["--public-url", "https://x.example"], None, None, "--require-token"),
-            (["--authorization-server", "https://auth.example"], None, None, "--require-token"),
             (["--stdio", "--token-stdin"], None, "\n", "--stdio"),
             (["--require-token", "--token-stdin"], None, "", "stdin is empty"),
         ]
@@ -1043,7 +1112,8 @@ def main():
     test_session_policies(binary)
     test_flag_validation(binary)
     test_filesystem_tools(binary)
-    test_tools_off_by_default(binary)
+    test_default_tools(binary)
+    test_origin_policies(binary)
     test_authorization(binary)
     test_stdio(binary)
 

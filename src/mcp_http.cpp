@@ -115,14 +115,11 @@ bool origin_is_loopback(const std::string& origin, std::uint16_t bound_port) {
 
 /// Absolute URL to advertise for the metadata document.
 ///
-/// Prefers an explicit operator override, then the Host header (so a deployment
-/// behind a reverse proxy advertises the name the proxy terminates), then the
-/// bound address. A Host header that does not look like a bare authority is
-/// ignored rather than echoed: this string is handed to clients inside a header
-/// they may follow.
-std::string advertised_base(const std::string& public_url, const std::string& host, std::uint16_t bound_port) {
-    if (!public_url.empty()) return public_url;
-
+/// The Host header first (so a deployment behind a reverse proxy advertises the
+/// name the proxy terminates), the bound address otherwise. A Host header that
+/// does not look like a bare authority is ignored rather than echoed: this
+/// string is handed to clients inside a header they may follow.
+std::string advertised_base(const std::string& host, std::uint16_t bound_port) {
     const bool looks_like_authority =
         !host.empty() && host.find_first_of(" /@?#\\\r\n") == std::string::npos;
     if (looks_like_authority) return "http://" + host;
@@ -156,10 +153,8 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
         // makes the server unreachable from any web page rather than merely
         // unreadable.
         if (tokens && !is_endpoint && method == "get" && request.path == tokens->metadata_path()) {
-            Response response = Response::json(200, tokens->metadata_json(
-                                                        advertised_base(tokens->public_url(), request.header("host"),
-                                                                        bound_port) +
-                                                        endpoint));
+            Response response = Response::json(
+                200, tokens->metadata_json(advertised_base(request.header("host"), bound_port) + endpoint));
             response.set("Cache-Control", "no-store");
             response.set("X-Content-Type-Options", "nosniff");
             return response;
@@ -184,8 +179,7 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
             const AuthResult auth = tokens->authorize(request);
             if (!auth.ok) {
                 const std::string metadata_url =
-                    advertised_base(tokens->public_url(), request.header("host"), bound_port) +
-                    tokens->metadata_path();
+                    advertised_base(request.header("host"), bound_port) + tokens->metadata_path();
                 log_debug("401 " + method + " " + request.path + ": " + auth.description);
 
                 Response response = error_response(

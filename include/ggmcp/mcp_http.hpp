@@ -47,8 +47,10 @@ struct HttpOptions {
     /// accepted.
     std::vector<std::string> allowed_origins;
 
-    /// Accept any Origin. Only turn this on if a browser will talk to this
-    /// server directly; it removes the DNS-rebinding guard.
+    /// Accept any Origin, which removes the DNS-rebinding guard. Off here so
+    /// that using this transport on its own stays careful; the `ggmcp` command
+    /// line turns it *on* for a bare invocation, and --strict-origin (or
+    /// naming origins with --allow-origin) turns it back off.
     bool allow_any_origin = false;
 
     /// Skip Origin validation entirely.

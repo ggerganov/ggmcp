@@ -21,9 +21,12 @@ void register_demo_tools(Dispatcher& dispatcher);
 Value tool_annotations(const std::string& title, bool read_only, bool destructive, bool idempotent,
                        bool open_world = false);
 
-/// Settings for the file and shell tools. These are deliberately OFF unless an
-/// operator turns them on: a `write`/`edit`/`bash` tool on an unauthenticated
-/// HTTP port is remote code execution with the server's privileges.
+/// Settings for the file and shell tools. The defaults here are OFF, so this
+/// layer never turns itself on - it is the command line that decides, and
+/// `ggmcp` with no flags does decide to turn both on, rooted at the home
+/// directory. Whatever the choice, a `write`/`edit`/`bash` tool on an
+/// unauthenticated HTTP port is remote code execution with the privileges of
+/// whoever started the process; see "Security" in the README.
 struct FileSystemOptions {
     std::string root = ".";            ///< confinement root for read/write/edit
     bool enable_file_tools = false;    ///< read / write / edit
