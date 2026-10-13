@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(ggmcp VERSION 0.1.0 LANGUAGES CXX
-        DESCRIPTION "A tiny Model Context Protocol server in dependency-free C++17")
+        DESCRIPTION "A tiny Model Context Protocol server on nlohmann/json and cpp-httplib")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,6 +25,8 @@ add_library(ggmcp_core STATIC
   src/filesystem_tools.cpp
 )
 target_include_directories(ggmcp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# Vendored single-header libraries: <nlohmann/json.hpp> and "httplib.h".
+target_include_directories(ggmcp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 target_link_libraries(ggmcp_core PUBLIC Threads::Threads)
 target_compile_options(ggmcp_core PRIVATE -Wall -Wextra -Wpedantic -Wshadow)
 

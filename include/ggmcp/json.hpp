@@ -1,13 +1,23 @@
-// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+// ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
 // SPDX-License-Identifier: MIT
 //
-// json.hpp - a minimal RFC 8259 JSON value, parser and serializer.
+// json.hpp - the JSON type this project speaks.
 //
-// This exists only because C++ has no standard JSON. It is deliberately NOT a
-// general-purpose library: no iterators, no custom allocators, no JSON Pointer,
-// no schema validation. It parses and emits JSON-RPC 2.0 messages, correctly
-// including UTF-8 and \uXXXX escapes, and nothing more.
+// There is no bespoke JSON implementation here: Value *is* nlohmann::json
+// (vendor/nlohmann/json.hpp), which owns parsing, serialization, escaping,
+// number handling and the type checks. What this header adds is the small set
+// of project conventions that nlohmann does not provide:
+//
+//   * Value / Array / Object aliases, so call sites read as project code and
+//     the rest of the tree never has to spell out nlohmann::json.
+//   * find(), returning a pointer instead of an iterator. At a protocol
+//     boundary "absent" is a routine answer, and callers want to test it
+//     rather than compare against end(), so nullptr means "no such member".
+//   * parse() / try_parse(), which cap nesting depth *before* a tree is
+//     built. nlohmann's parser is iterative (no stack risk on input), but its
+//     serializer recurses, so a hostile message must be refused while it is
+//     still text.
 
 #ifndef GGGMCP_JSON_HPP
 #define GGGMCP_JSON_HPP
@@ -17,121 +27,54 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <type_traits>
-#include <variant>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace ggmcp {
 
-class Value;
+/// The JSON value. Everything - parsing, dumping, typing - is nlohmann/json.
+using Value = nlohmann::json;
 
+/// Container types. These are exactly Value::array_t / Value::object_t, so
+/// they convert to and from nlohmann containers without a copy.
 using Array  = std::vector<Value>;
 using Object = std::map<std::string, Value>;
 
-/// Thrown by Value::parse() on malformed input.
+/// Thrown by parse() on malformed input or on input that nests too deeply.
 class parse_error : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-/// Thrown by the typed accessors when the dynamic type does not match.
-class type_error : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
+/// Deepest nesting parse() accepts. Deep enough for any real message, shallow
+/// enough that dumping one never runs the recursive serializer out of stack.
+inline constexpr int kMaxJsonDepth = 128;
 
-/// A JSON value.
-class Value {
-public:
-    enum class Type { Null, Bool, Int, Double, String, Array, Object };
+/// Parses a complete JSON document. Throws ggmcp::parse_error on malformed
+/// input, on trailing garbage, and on nesting deeper than `max_depth`.
+Value parse(std::string_view input, int max_depth = kMaxJsonDepth);
 
-    Value() = default;
+/// Non-throwing parse. Returns false and fills `error` on failure, leaving
+/// `out` untouched.
+bool try_parse(std::string_view input, Value& out, std::string& error,
+               int max_depth = kMaxJsonDepth);
 
-    static Value make_null()                     { return Value(); }
-    static Value make_bool(bool v)               { Value x; x.data_ = v;            return x; }
-    static Value make_int(std::int64_t v)        { Value x; x.data_ = v;            return x; }
-    static Value make_double(double v)           { Value x; x.data_ = v;            return x; }
-    static Value make_string(std::string v)      { Value x; x.data_ = std::move(v); return x; }
-    static Value make_array(Array v = {})        { Value x; x.data_ = std::move(v); return x; }
-    static Value make_object(Object v = {})      { Value x; x.data_ = std::move(v); return x; }
+/// Serialize to compact JSON. Identical to `value.dump()` except for invalid
+/// UTF-8: nlohmann's default is to throw, which would turn "a tool returned a
+/// byte that is not part of a character" into a failed request. ggmcp replaces
+/// such bytes with U+FFFD instead, so the answer still goes out - as valid JSON.
+std::string dump(const Value& value);
 
-    /// Relies on the variant alternative order matching the Type enum order;
-    /// asserted at the bottom of this class.
-    Type type() const { return static_cast<Type>(data_.index()); }
+/// Object member lookup. Returns nullptr when the key is absent, or when
+/// `value` is not an object - never throws, which is what makes it usable at
+/// the protocol boundary.
+const Value* find(const Value& value, std::string_view key);
 
-    const char* type_name() const;
-
-    bool is_null()   const { return std::holds_alternative<std::monostate>(data_); }
-    bool is_bool()   const { return std::holds_alternative<bool>(data_); }
-    bool is_int()    const { return std::holds_alternative<std::int64_t>(data_); }
-    bool is_double() const { return std::holds_alternative<double>(data_); }
-    bool is_number() const { return is_int() || is_double(); }
-    bool is_string() const { return std::holds_alternative<std::string>(data_); }
-    bool is_array()  const { return std::holds_alternative<Array>(data_); }
-    bool is_object() const { return std::holds_alternative<Object>(data_); }
-
-    bool as_bool() const                 { expect(is_bool());    return std::get<bool>(data_); }
-    std::int64_t as_int() const          { expect(is_int());     return std::get<std::int64_t>(data_); }
-    double as_double() const             { expect(is_number());  return is_int()
-                                                                    ? static_cast<double>(std::get<std::int64_t>(data_))
-                                                                    : std::get<double>(data_); }
-    const std::string& as_string() const { expect(is_string());  return std::get<std::string>(data_); }
-    const Array& as_array() const        { expect(is_array());   return std::get<Array>(data_); }
-    const Object& as_object() const      { expect(is_object());  return std::get<Object>(data_); }
-    Array& as_array()                    { expect(is_array());   return std::get<Array>(data_); }
-    Object& as_object()                  { expect(is_object());  return std::get<Object>(data_); }
-
-    /// Object lookup. Returns nullptr when absent or when *this is not an object.
-    /// Never throws - this is the accessor you want at protocol boundaries.
-    const Value* find(std::string_view key) const {
-        if (!is_object()) return nullptr;
-        const auto& obj = std::get<Object>(data_);
-        const auto it = obj.find(std::string(key));
-        return it == obj.end() ? nullptr : &it->second;
-    }
-
-    /// Array indexing. Returns nullptr when out of range or not an array.
-    const Value* at(std::size_t index) const {
-        if (!is_array()) return nullptr;
-        const auto& arr = std::get<Array>(data_);
-        return index < arr.size() ? &arr[index] : nullptr;
-    }
-
-    std::size_t size() const {
-        if (is_array())  return std::get<Array>(data_).size();
-        if (is_object()) return std::get<Object>(data_).size();
-        if (is_string()) return std::get<std::string>(data_).size();
-        return 0;
-    }
-
-    bool contains(std::string_view key) const { return find(key) != nullptr; }
-
-    /// Serializes to compact JSON. UTF-8 safe; escapes only what RFC 8259 requires.
-    void dump_to(std::string& out) const;
-    std::string dump() const { std::string s; dump_to(s); return s; }
-
-    /// Parses a complete JSON document. Throws parse_error on malformed input or
-    /// trailing garbage. Nesting is capped to keep hostile input off the stack.
-    static Value parse(std::string_view input, int max_depth = 128);
-
-    /// Non-throwing parse. Returns false and fills `error` on failure.
-    static bool try_parse(std::string_view input, Value& out, std::string& error, int max_depth = 128);
-
-private:
-    void expect(bool ok) const {
-        if (!ok) throw type_error(std::string("json: wrong dynamic type, found ") + type_name());
-    }
-
-    std::variant<std::monostate, bool, std::int64_t, double, std::string, Array, Object> data_;
-
-    static_assert(std::variant_size_v<decltype(data_)> == 7,
-                  "Value::data_ alternatives must stay in lockstep with Value::Type");
-};
-
-/// Convenience shorthands so call sites read better than Value::make_string(...).
-inline Value str(std::string s)  { return Value::make_string(std::move(s)); }
-inline Value num(std::int64_t v) { return Value::make_int(v); }
-inline Value boolean(bool v)     { return Value::make_bool(v); }
+/// Null-safe overload for chaining: `find(find(request, "params"), "name")`.
+/// A missing member yields nullptr, and looking *into* nullptr yields nullptr
+/// instead of a crash.
+const Value* find(const Value* value, std::string_view key);
 
 }  // namespace ggmcp
 

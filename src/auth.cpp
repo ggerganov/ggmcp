@@ -1,4 +1,4 @@
-// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+// ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
 // SPDX-License-Identifier: MIT
 //
@@ -310,23 +310,23 @@ AuthResult TokenStore::authorize(const Request& request) const {
 
 std::string TokenStore::metadata_json(const std::string& resource) const {
     Object document;
-    document["resource"] = Value::make_string(resource);
+    document["resource"] = Value(resource);
 
     Array bearer_methods;
-    bearer_methods.push_back(Value::make_string("header"));
-    document["bearer_methods_supported"] = Value::make_array(std::move(bearer_methods));
+    bearer_methods.push_back(Value("header"));
+    document["bearer_methods_supported"] = Value(std::move(bearer_methods));
 
     Array servers;
-    for (const std::string& url : authorization_servers_) servers.push_back(Value::make_string(url));
+    for (const std::string& url : authorization_servers_) servers.push_back(Value(url));
     // Absent rather than empty on purpose. ggmcp is not an authorization server:
     // it mints nothing, so there is nothing to advertise unless the operator
     // named a real one. A client that insists on full OAuth discovery will not
     // get anywhere here, which is the honest answer.
-    if (!servers.empty()) document["authorization_servers"] = Value::make_array(std::move(servers));
+    if (!servers.empty()) document["authorization_servers"] = Value(std::move(servers));
 
     // No scopes_supported: this server does not enforce scopes, and advertising
     // ones it ignores would be a claim the code does not keep.
-    return Value::make_object(std::move(document)).dump();
+    return dump(Value(std::move(document)));
 }
 
 std::string TokenStore::www_authenticate(const std::string& metadata_url, const std::string& error,

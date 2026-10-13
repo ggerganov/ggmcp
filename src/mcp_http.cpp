@@ -1,4 +1,4 @@
-// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+// ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
 // SPDX-License-Identifier: MIT
 
@@ -10,6 +10,9 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <initializer_list>
+#include <string>
+#include <utility>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -67,11 +70,16 @@ Response json_rpc_response(Reply reply) {
     return response;
 }
 
+/// The body of a transport-level refusal: `fields` in the order written, so
+/// the JSON reads the way the sentence does.
+Response error_response(int status, std::initializer_list<std::pair<std::string, std::string>> fields) {
+    Object body;
+    for (const auto& field : fields) body[field.first] = Value(field.second);
+    return Response::json(status, dump(Value(std::move(body))));
+}
+
 Response method_not_allowed(const std::string& allowed) {
-    Response response = Response::json(405, Value::make_object(Object{
-                                                {"error", Value::make_string("method not allowed")},
-                                                {"allow", Value::make_string(allowed)},
-                                            }).dump());
+    Response response = error_response(405, {{"error", "method not allowed"}, {"allow", allowed}});
     response.set("Allow", allowed);
     return response;
 }
@@ -180,12 +188,10 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
                     tokens->metadata_path();
                 log_debug("401 " + method + " " + request.path + ": " + auth.description);
 
-                Response response = Response::json(401, Value::make_object(Object{
-                                                           {"error", Value::make_string("unauthorized")},
-                                                           {"error_description", Value::make_string(auth.description)},
-                                                           {"resource_metadata", Value::make_string(metadata_url)},
-                                                       })
-                                                       .dump());
+                Response response = error_response(
+                    401, {{"error", "unauthorized"},
+                          {"error_description", auth.description},
+                          {"resource_metadata", metadata_url}});
                 response.set("WWW-Authenticate", tokens->www_authenticate(metadata_url, auth.oauth_error,
                                                                          auth.description));
                 response.set("Cache-Control", "no-store");
@@ -198,27 +204,27 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
         // --- non-MCP conveniences -----------------------------------------
         if (!is_endpoint && options.enable_health_endpoint && request.path == "/health" && method == "get") {
             Object status;
-            status["status"] = Value::make_string("ok");
-            status["server"] = Value::make_string(dispatcher.server_name());
-            status["version"] = Value::make_string(dispatcher.server_version());
-            status["transport"] = Value::make_string("streamable-http");
-            status["endpoint"] = Value::make_string(endpoint);
-            status["protocolVersion"] = Value::make_string(latest_protocol_version());
+            status["status"] = Value("ok");
+            status["server"] = Value(dispatcher.server_name());
+            status["version"] = Value(dispatcher.server_version());
+            status["transport"] = Value("streamable-http");
+            status["endpoint"] = Value(endpoint);
+            status["protocolVersion"] = Value(latest_protocol_version());
 
             Array versions;
-            for (const auto& v : supported_protocol_versions()) versions.push_back(Value::make_string(v));
-            status["supportedProtocolVersions"] = Value::make_array(std::move(versions));
+            for (const auto& v : supported_protocol_versions()) versions.push_back(Value(v));
+            status["supportedProtocolVersions"] = Value(std::move(versions));
 
             Array tools;
-            for (const auto& name : dispatcher.tool_names()) tools.push_back(Value::make_string(name));
-            status["tools"] = Value::make_array(std::move(tools));
-            status["sessions"] = Value::make_int(static_cast<std::int64_t>(dispatcher.session_count()));
-            status["sessionPolicy"] = Value::make_string(to_string(dispatcher.session_policy()));
+            for (const auto& name : dispatcher.tool_names()) tools.push_back(Value(name));
+            status["tools"] = Value(std::move(tools));
+            status["sessions"] = Value(static_cast<std::int64_t>(dispatcher.session_count()));
+            status["sessionPolicy"] = Value(to_string(dispatcher.session_policy()));
             // Which tools exist is configuration, and configuration is worth
             // protecting: with auth on, /health is behind the token too.
-            status["authorization"] = Value::make_string(auth_required ? "bearer" : "anonymous");
+            status["authorization"] = Value(auth_required ? "bearer" : "anonymous");
 
-            return Response::json(200, Value::make_object(std::move(status)).dump());
+            return Response::json(200, dump(Value(std::move(status))));
         }
 
         if (!is_endpoint && options.enable_index_endpoint && request.path == "/" && method == "get") {
@@ -255,12 +261,9 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
         }
 
         if (!is_endpoint) {
-            return Response::json(404, Value::make_object(Object{
-                                           {"error", Value::make_string("not found")},
-                                           {"path", Value::make_string(request.path)},
-                                           {"endpoint", Value::make_string(endpoint)},
-                                       })
-                                       .dump());
+            return error_response(404, {{"error", "not found"},
+                                         {"path", request.path},
+                                         {"endpoint", endpoint}});
         }
 
         // --- endpoint routing ---------------------------------------------
@@ -280,14 +283,11 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
             }
             const std::string session_id = request.header("mcp-session-id");
             if (session_id.empty() || !dispatcher.session_exists(session_id)) {
-                return Response::json(404, Value::make_object(Object{
-                                               {"error", Value::make_string("unknown session")},
-                                           })
-                                           .dump());
+                return error_response(404, {{"error", "unknown session"}});
             }
             dispatcher.destroy_session(session_id);
             log_debug("session " + session_id + " closed by client");
-            return Response::json(200, Value::make_object(Object{{"deleted", Value::make_bool(true)}}).dump());
+            return Response::json(200, dump(Value(Object{{"deleted", Value(true)}})));
         }
 
         if (method != "post") return method_not_allowed(allowed);
@@ -300,39 +300,28 @@ HttpServer::Handler make_http_handler(Dispatcher& dispatcher, HttpOptions option
             if (allowed_origin == options.allowed_origins.end() &&
                 !(options.allow_any_origin || origin_is_loopback(origin, bound_port))) {
                 log_line("rejected Origin: " + origin);
-                return Response::json(403, Value::make_object(Object{{"error", Value::make_string("Origin not allowed")},
-                                                                      {"origin", Value::make_string(origin)}})
-                                              .dump());
+                return error_response(403, {{"error", "Origin not allowed"}, {"origin", origin}});
             }
         }
 
         // --- Accept / Content-Type negotiation ----------------------------
         const std::string accept = request.header("accept");
         if (!accept.empty() && !contains_any(accept, {"application/json", "*/*"})) {
-            Response response = Response::json(406, Value::make_object(Object{
-                                                        {"error", Value::make_string("this endpoint returns application/json")},
-                                                        {"accept", Value::make_string(accept)},
-                                                    })
-                                                    .dump());
+            Response response = error_response(
+                406, {{"error", "this endpoint returns application/json"}, {"accept", accept}});
             response.set("Allow", allowed);
             return response;
         }
 
         const std::string content_type = request.header("content-type");
         if (!content_type.empty() && !contains_any(content_type, {"application/json"})) {
-            return Response::json(415, Value::make_object(Object{
-                                           {"error", Value::make_string("Content-Type must be application/json")},
-                                           {"content-type", Value::make_string(content_type)},
-                                       })
-                                       .dump());
+            return error_response(415, {{"error", "Content-Type must be application/json"},
+                                         {"content-type", content_type}});
         }
 
         if (!protocol_header_ok(request)) {
-            return Response::json(400, Value::make_object(Object{
-                                           {"error", Value::make_string("Unsupported MCP-Protocol-Version")},
-                                           {"received", Value::make_string(request.header("mcp-protocol-version"))},
-                                       })
-                                       .dump());
+            return error_response(400, {{"error", "Unsupported MCP-Protocol-Version"},
+                                         {"received", request.header("mcp-protocol-version")}});
         }
 
         Context ctx;

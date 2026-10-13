@@ -1,4 +1,4 @@
-// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+// ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
 // SPDX-License-Identifier: MIT
 
@@ -37,56 +37,56 @@ namespace schema {
 
 Value string(const std::string& description, const std::vector<std::string>& allowed) {
     Object v;
-    v["type"] = Value::make_string("string");
-    if (!description.empty()) v["description"] = Value::make_string(description);
+    v["type"] = Value("string");
+    if (!description.empty()) v["description"] = Value(description);
     if (!allowed.empty()) {
         Array values;
-        for (const auto& a : allowed) values.push_back(Value::make_string(a));
-        v["enum"] = Value::make_array(std::move(values));
+        for (const auto& a : allowed) values.push_back(Value(a));
+        v["enum"] = Value(std::move(values));
     }
-    return Value::make_object(std::move(v));
+    return Value(std::move(v));
 }
 
 Value integer(const std::string& description) {
     Object v;
-    v["type"] = Value::make_string("integer");
-    if (!description.empty()) v["description"] = Value::make_string(description);
-    return Value::make_object(std::move(v));
+    v["type"] = Value("integer");
+    if (!description.empty()) v["description"] = Value(description);
+    return Value(std::move(v));
 }
 
 Value boolean(const std::string& description) {
     Object v;
-    v["type"] = Value::make_string("boolean");
-    if (!description.empty()) v["description"] = Value::make_string(description);
-    return Value::make_object(std::move(v));
+    v["type"] = Value("boolean");
+    if (!description.empty()) v["description"] = Value(description);
+    return Value(std::move(v));
 }
 
 Value array(const std::string& description, Value items, std::int64_t min_items) {
     Object v;
-    v["type"] = Value::make_string("array");
-    if (!description.empty()) v["description"] = Value::make_string(description);
+    v["type"] = Value("array");
+    if (!description.empty()) v["description"] = Value(description);
     v["items"] = std::move(items);
-    if (min_items > 0) v["minItems"] = Value::make_int(min_items);
-    return Value::make_object(std::move(v));
+    if (min_items > 0) v["minItems"] = Value(min_items);
+    return Value(std::move(v));
 }
 
 Value string_array(const std::string& description, std::int64_t min_items) {
-    return array(description, Value::make_object(Object{{"type", Value::make_string("string")}}), min_items);
+    return array(description, Value(Object{{"type", Value("string")}}), min_items);
 }
 
 Value object(std::map<std::string, Value> properties, std::vector<std::string> required) {
     Object v;
-    v["type"] = Value::make_string("object");
+    v["type"] = Value("object");
     Object props;
     for (auto&& kv : properties) props[kv.first] = kv.second;
-    v["properties"] = Value::make_object(std::move(props));
+    v["properties"] = Value(std::move(props));
     Array req;
-    for (auto&& r : required) req.push_back(Value::make_string(std::move(r)));
-    v["required"] = Value::make_array(std::move(req));
+    for (auto&& r : required) req.push_back(Value(std::move(r)));
+    v["required"] = Value(std::move(req));
     // Most MCP clients validate arguments against this schema; being explicit
     // about extra keys avoids "additional properties" surprises.
-    v["additionalProperties"] = Value::make_bool(false);
-    return Value::make_object(std::move(v));
+    v["additionalProperties"] = Value(false);
+    return Value(std::move(v));
 }
 
 }  // namespace schema
@@ -160,40 +160,40 @@ std::string Dispatcher::new_session_id() const {
 
 Value Dispatcher::error_object(int code, const std::string& message, const Value& id) const {
     Object error;
-    error["code"] = Value::make_int(code);
-    error["message"] = Value::make_string(message);
+    error["code"] = Value(code);
+    error["message"] = Value(message);
     Object response;
-    response["jsonrpc"] = Value::make_string("2.0");
+    response["jsonrpc"] = Value("2.0");
     response["id"] = id;
-    response["error"] = Value::make_object(std::move(error));
-    return Value::make_object(std::move(response));
+    response["error"] = Value(std::move(error));
+    return Value(std::move(response));
 }
 
 Reply Dispatcher::make_result(Value result, const Value& id) const {
     Object response;
-    response["jsonrpc"] = Value::make_string("2.0");
+    response["jsonrpc"] = Value("2.0");
     response["id"] = id;
     response["result"] = std::move(result);
-    return Reply::ok(Value::make_object(std::move(response)).dump());
+    return Reply::ok(dump(Value(std::move(response))));
 }
 
 Reply Dispatcher::rpc_error(int code, const std::string& message, const Value& id) const {
-    return Reply::ok(error_object(code, message, id).dump());
+    return Reply::ok(dump(error_object(code, message, id)));
 }
 
 Reply Dispatcher::http_error(int status, int code, const std::string& message, const Value& id) const {
     Reply reply;
     reply.status = status;
-    reply.body = error_object(code, message, id).dump();
+    reply.body = dump(error_object(code, message, id));
     return reply;
 }
 
 Reply Dispatcher::handle(std::string_view message, Context ctx) {
-    const Value null_id = Value::make_null();
+    const Value null_id = Value(nullptr);
 
     Value request;
     std::string parse_error_text;
-    if (!Value::try_parse(message, request, parse_error_text)) {
+    if (!ggmcp::try_parse(message, request, parse_error_text)) {
         log_line("parse error: " + parse_error_text);
         return http_error(400, error_code::kParseError, "Parse error: " + parse_error_text, null_id);
     }
@@ -208,25 +208,25 @@ Reply Dispatcher::handle(std::string_view message, Context ctx) {
         return http_error(400, error_code::kInvalidRequest, "JSON-RPC message must be an object", null_id);
     }
 
-    const Value* jsonrpc = request.find("jsonrpc");
-    if (!jsonrpc || !jsonrpc->is_string() || jsonrpc->as_string() != "2.0") {
+    const Value* jsonrpc = find(request, "jsonrpc");
+    if (!jsonrpc || !jsonrpc->is_string() || jsonrpc->get<std::string>() != "2.0") {
         return http_error(400, error_code::kInvalidRequest,
                           "Unsupported JSON-RPC version, expected \"2.0\"", null_id);
     }
 
-    const Value* method = request.find("method");
+    const Value* method = find(request, "method");
     if (!method || !method->is_string()) {
         return http_error(400, error_code::kInvalidRequest, "Missing or non-string \"method\"", null_id);
     }
 
-    const Value* id = request.find("id");
+    const Value* id = find(request, "id");
     const bool has_id = id && !id->is_null();
-    const Value id_value = has_id ? *id : Value::make_null();
+    const Value id_value = has_id ? *id : Value(nullptr);
 
     if (verbose()) {
         std::ostringstream os;
-        os << (has_id ? "request " : "notify  ") << method->as_string();
-        if (has_id) os << " id=" << id_value.dump();
+        os << (has_id ? "request " : "notify  ") << method->get<std::string>();
+        if (has_id) os << " id=" << dump(id_value);
         if (!ctx.session_id.empty()) os << " session=" << ctx.session_id;
         if (!ctx.peer.empty()) os << " from " << ctx.peer;
         log_debug(os.str());
@@ -236,12 +236,12 @@ Reply Dispatcher::handle(std::string_view message, Context ctx) {
 }
 
 Reply Dispatcher::dispatch(const Value& request, const Value& id, bool has_id, Context& ctx) {
-    const std::string method = request.find("method")->as_string();
-    const Value* params = request.find("params");
+    const std::string method = find(request, "method")->get<std::string>();
+    const Value* params = find(request, "params");
     if (params && !params->is_object() && !params->is_null()) {
         return rpc_error(error_code::kInvalidParams, "\"params\" must be an object", id);
     }
-    const Value empty_params = Value::make_object();
+    const Value empty_params = Value::object();
     const Value& p = params ? *params : empty_params;
 
     // Notifications never get a reply body; transports send 202 Accepted.
@@ -291,14 +291,14 @@ Reply Dispatcher::dispatch(const Value& request, const Value& id, bool has_id, C
         }
     }
 
-    if (method == "ping") return make_result(Value::make_object(), id);
+    if (method == "ping") return make_result(Value::object(), id);
     if (method == "tools/list") return on_tools_list(p, id);
     if (method == "tools/call") return on_tools_call(p, id, ctx);
     if (method == "resources/list" || method == "prompts/list") {
         // Not advertised in capabilities, so a well-behaved client will not ask.
         // Answering explicitly is friendlier than a bare -32601.
-        return make_result(method == "resources/list" ? Value::make_object(Object{{"resources", Value::make_array()}})
-                                                      : Value::make_object(Object{{"prompts", Value::make_array()}}),
+        return make_result(method == "resources/list" ? Value(Object{{"resources", Value::array()}})
+                                                      : Value(Object{{"prompts", Value::array()}}),
                            id);
     }
 
@@ -306,15 +306,15 @@ Reply Dispatcher::dispatch(const Value& request, const Value& id, bool has_id, C
 }
 
 Reply Dispatcher::on_initialize(const Value& params, const Value& id, Context& ctx) {
-    const Value* requested = params.find("protocolVersion");
+    const Value* requested = find(params, "protocolVersion");
     if (!requested || !requested->is_string()) {
         return rpc_error(error_code::kInvalidParams, "initialize requires params.protocolVersion (string)", id);
     }
 
     const std::string& version =
         std::find(supported_protocol_versions().begin(), supported_protocol_versions().end(),
-                  requested->as_string()) != supported_protocol_versions().end()
-            ? requested->as_string()
+                  requested->get<std::string>()) != supported_protocol_versions().end()
+            ? requested->get<std::string>()
             : latest_protocol_version();
 
     // A stateless server hands out no id at all, which is the most compatible
@@ -324,9 +324,9 @@ Reply Dispatcher::on_initialize(const Value& params, const Value& id, Context& c
     Session session;
     if (issue_session) session.id = ctx.transport == "http" ? new_session_id() : "stdio";
     session.protocol_version = version;
-    if (const Value* info = params.find("clientInfo")) {
-        if (const Value* name = info->find("name"); name && name->is_string()) session.client_name = name->as_string();
-        if (const Value* v = info->find("version"); v && v->is_string()) session.client_version = v->as_string();
+    if (const Value* info = find(params, "clientInfo")) {
+        if (const Value* name = find(info, "name"); name && name->is_string()) session.client_name = name->get<std::string>();
+        if (const Value* v = find(info, "version"); v && v->is_string()) session.client_version = v->get<std::string>();
     }
     session.initialized = false;
 
@@ -340,25 +340,25 @@ Reply Dispatcher::on_initialize(const Value& params, const Value& id, Context& c
     ctx.client_version = session.client_version;
 
     Object tools_capability;
-    tools_capability["listChanged"] = Value::make_bool(false);
+    tools_capability["listChanged"] = Value(false);
 
     Object capabilities;
-    capabilities["tools"] = Value::make_object(std::move(tools_capability));
+    capabilities["tools"] = Value(std::move(tools_capability));
 
     Object server_info;
-    server_info["name"] = Value::make_string(name_);
-    server_info["title"] = Value::make_string(name_);
-    server_info["version"] = Value::make_string(version_);
+    server_info["name"] = Value(name_);
+    server_info["title"] = Value(name_);
+    server_info["version"] = Value(version_);
 
     Object result;
-    result["protocolVersion"] = Value::make_string(version);
-    result["capabilities"] = Value::make_object(std::move(capabilities));
-    result["serverInfo"] = Value::make_object(std::move(server_info));
-    result["instructions"] = Value::make_string(
+    result["protocolVersion"] = Value(version);
+    result["capabilities"] = Value(std::move(capabilities));
+    result["serverInfo"] = Value(std::move(server_info));
+    result["instructions"] = Value(
         "A demonstration MCP server. Call the hello tool to greet someone, echo to round-trip "
         "text, or utc_now for the current time.");
 
-    Reply reply = make_result(Value::make_object(std::move(result)), id);
+    Reply reply = make_result(Value(std::move(result)), id);
     reply.session_id = session.id;
     log_line("initialized: client=" + (session.client_name.empty() ? std::string("<unknown>") : session.client_name) +
              " protocol=" + version + " transport=" + ctx.transport +
@@ -392,26 +392,26 @@ Reply Dispatcher::on_tools_list(const Value& /*params*/, const Value& id) const 
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& tool : tools_) {
             Object entry;
-            entry["name"] = Value::make_string(tool.name);
-            entry["description"] = Value::make_string(tool.description);
+            entry["name"] = Value(tool.name);
+            entry["description"] = Value(tool.description);
             entry["inputSchema"] = tool.input_schema;
             if (!tool.annotations.is_null()) entry["annotations"] = tool.annotations;
-            tools.push_back(Value::make_object(std::move(entry)));
+            tools.push_back(Value(std::move(entry)));
         }
     }
     Object result;
-    result["tools"] = Value::make_array(std::move(tools));
-    return make_result(Value::make_object(std::move(result)), id);
+    result["tools"] = Value(std::move(tools));
+    return make_result(Value(std::move(result)), id);
 }
 
 Reply Dispatcher::on_tools_call(const Value& params, const Value& id, Context& ctx) const {
-    const Value* name = params.find("name");
+    const Value* name = find(params, "name");
     if (!name || !name->is_string()) {
         return rpc_error(error_code::kInvalidParams, "tools/call requires params.name (string)", id);
     }
 
-    const Value arguments = Value::make_object();
-    const Value* provided = params.find("arguments");
+    const Value arguments = Value::object();
+    const Value* provided = find(params, "arguments");
     if (provided && !provided->is_object()) {
         return rpc_error(error_code::kInvalidParams, "\"arguments\" must be an object", id);
     }
@@ -421,13 +421,13 @@ Reply Dispatcher::on_tools_call(const Value& params, const Value& id, Context& c
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = std::find_if(tools_.begin(), tools_.end(),
-                                     [&](const Tool& t) { return t.name == name->as_string(); });
+                                     [&](const Tool& t) { return t.name == name->get<std::string>(); });
         if (it != tools_.end()) tool = &*it;
     }
 
     if (!tool) {
         // A missing tool is a protocol-level bad request, not a tool failure.
-        return rpc_error(error_code::kInvalidParams, "Unknown tool: " + name->as_string(), id);
+        return rpc_error(error_code::kInvalidParams, "Unknown tool: " + name->get<std::string>(), id);
     }
 
     // A throwing handler is a tool execution failure, which the spec wants
@@ -435,19 +435,19 @@ Reply Dispatcher::on_tools_call(const Value& params, const Value& id, Context& c
     try {
         ToolResult result = tool->handler(args, ctx);
         Object body;
-        body["content"] = Value::make_array(std::move(result.content));
-        body["isError"] = Value::make_bool(result.is_error);
-        return make_result(Value::make_object(std::move(body)), id);
+        body["content"] = Value(std::move(result.content));
+        body["isError"] = Value(result.is_error);
+        return make_result(Value(std::move(body)), id);
     } catch (const std::exception& e) {
-        log_line("tool '" + name->as_string() + "' threw: " + e.what());
+        log_line("tool '" + name->get<std::string>() + "' threw: " + e.what());
         Object body;
-        body["content"] = Value::make_array();
+        body["content"] = Value::array();
         Object block;
-        block["type"] = Value::make_string("text");
-        block["text"] = Value::make_string(std::string("Tool failed: ") + e.what());
-        body["content"].as_array().push_back(Value::make_object(std::move(block)));
-        body["isError"] = Value::make_bool(true);
-        return make_result(Value::make_object(std::move(body)), id);
+        block["type"] = Value("text");
+        block["text"] = Value(std::string("Tool failed: ") + e.what());
+        body["content"].push_back(Value(std::move(block)));
+        body["isError"] = Value(true);
+        return make_result(Value(std::move(body)), id);
     }
 }
 

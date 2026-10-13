@@ -1,4 +1,4 @@
-// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+// ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
 // SPDX-License-Identifier: MIT
 //
@@ -27,29 +27,29 @@ std::string shout(std::string text) {
 /// Reads an optional string argument, rejecting the wrong type rather than
 /// coercing it - a tool should tell the model what it got wrong.
 bool optional_string(const Value& args, const char* key, std::string& out, std::string& error) {
-    const Value* value = args.find(key);
+    const Value* value = find(args, key);
     if (!value || value->is_null()) return true;
     if (!value->is_string()) {
         error = std::string("\"") + key + "\" must be a string";
         return false;
     }
-    out = value->as_string();
+    out = value->get<std::string>();
     return true;
 }
 
 bool optional_bool(const Value& args, const char* key, bool& out, std::string& error) {
-    const Value* value = args.find(key);
+    const Value* value = find(args, key);
     if (!value || value->is_null()) return true;
-    if (!value->is_bool()) {
+    if (!value->is_boolean()) {
         error = std::string("\"") + key + "\" must be a boolean";
         return false;
     }
-    out = value->as_bool();
+    out = value->get<bool>();
     return true;
 }
 
 /// Convenience for a tool that answers with one JSON document.
-ToolResult as_json(Object payload) { return ToolResult::json(Value::make_object(std::move(payload)).dump()); }
+ToolResult as_json(Object payload) { return ToolResult::json(dump(Value(std::move(payload)))); }
 
 }  // namespace
 
@@ -94,11 +94,11 @@ void register_demo_tools(Dispatcher& dispatcher) {
         tool.annotations = tool_annotations("Echo text", /*read_only=*/true, /*destructive=*/false,
                                       /*idempotent=*/true);
         tool.handler = [](const Value& args, const Context&) -> ToolResult {
-            const Value* message = args.find("message");
+            const Value* message = find(args, "message");
             if (!message) return ToolResult::error("\"message\" is required");
             if (!message->is_string()) return ToolResult::error("\"message\" must be a string");
-            if (message->as_string().empty()) return ToolResult::error("\"message\" must not be empty");
-            return ToolResult::text(message->as_string());
+            if (message->get<std::string>().empty()) return ToolResult::error("\"message\" must not be empty");
+            return ToolResult::text(message->get<std::string>());
         };
         dispatcher.add_tool(std::move(tool));
     }
@@ -127,10 +127,10 @@ void register_demo_tools(Dispatcher& dispatcher) {
             std::strftime(weekday, sizeof(weekday), "%A", &utc);
 
             Object payload;
-            payload["iso8601"] = Value::make_string(iso);
-            payload["weekday"] = Value::make_string(weekday);
-            payload["epochMillis"] = Value::make_int(static_cast<std::int64_t>(millis));
-            payload["timezone"] = Value::make_string("UTC");
+            payload["iso8601"] = Value(iso);
+            payload["weekday"] = Value(weekday);
+            payload["epochMillis"] = Value(static_cast<std::int64_t>(millis));
+            payload["timezone"] = Value("UTC");
             return as_json(std::move(payload));
         };
         dispatcher.add_tool(std::move(tool));
@@ -148,20 +148,20 @@ void register_demo_tools(Dispatcher& dispatcher) {
                                       /*idempotent=*/true);
         tool.handler = [](const Value&, const Context& ctx) -> ToolResult {
             Object payload;
-            payload["transport"] = Value::make_string(ctx.transport);
+            payload["transport"] = Value(ctx.transport);
             // "(implicit)" means the caller sent no usable Mcp-Session-Id and was
             // served against an implicit session - legal under the default policy.
-            payload["sessionId"] = Value::make_string(ctx.session_id.empty() ? std::string("(implicit)")
+            payload["sessionId"] = Value(ctx.session_id.empty() ? std::string("(implicit)")
                                                                               : ctx.session_id);
-            payload["peer"] = Value::make_string(ctx.peer);
+            payload["peer"] = Value(ctx.peer);
             // Which credential source authenticated this call ("env:GGMCP_TOKEN",
             // "tokens.txt:2", or "anonymous"). The secret itself is never in reach
             // of a tool, so it cannot be echoed back to the caller that presented it.
-            payload["authorization"] = Value::make_string(ctx.auth.empty() ? std::string("anonymous")
+            payload["authorization"] = Value(ctx.auth.empty() ? std::string("anonymous")
                                                                            : ctx.auth);
-            payload["clientName"] = Value::make_string(ctx.client_name);
-            payload["clientVersion"] = Value::make_string(ctx.client_version);
-            payload["server"] = Value::make_string(std::string(kDefaultServerName) + "/" +
+            payload["clientName"] = Value(ctx.client_name);
+            payload["clientVersion"] = Value(ctx.client_version);
+            payload["server"] = Value(std::string(kDefaultServerName) + "/" +
                                                    kDefaultServerVersion);
             return as_json(std::move(payload));
         };

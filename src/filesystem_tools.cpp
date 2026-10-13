@@ -1,4 +1,4 @@
-// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+// ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
 // SPDX-License-Identifier: MIT
 //
@@ -41,12 +41,12 @@ namespace fs = std::filesystem;
 Value tool_annotations(const std::string& title, bool read_only, bool destructive, bool idempotent,
                        bool open_world) {
     Object object;
-    object["title"] = Value::make_string(title);
-    object["readOnlyHint"] = Value::make_bool(read_only);
-    object["destructiveHint"] = Value::make_bool(destructive);
-    object["idempotentHint"] = Value::make_bool(idempotent);
-    object["openWorldHint"] = Value::make_bool(open_world);
-    return Value::make_object(std::move(object));
+    object["title"] = Value(title);
+    object["readOnlyHint"] = Value(read_only);
+    object["destructiveHint"] = Value(destructive);
+    object["idempotentHint"] = Value(idempotent);
+    object["openWorldHint"] = Value(open_world);
+    return Value(std::move(object));
 }
 
 namespace {
@@ -142,12 +142,12 @@ std::string preview(const std::string& text, std::size_t budget = 60) {
 
 std::string describe(const Value& value, const char* key) {
     return std::string("\"") + key + "\" must be a " +
-           (value.is_string() ? "string" : value.is_int() ? "integer" : value.is_bool() ? "boolean"
+           (value.is_string() ? "string" : value.is_number_integer() ? "integer" : value.is_boolean() ? "boolean"
                                                                                         : "different type");
 }
 
 bool require_string(const Value& args, const char* key, std::string& out, std::string& error) {
-    const Value* value = args.find(key);
+    const Value* value = find(args, key);
     if (!value || value->is_null()) {
         error = std::string("\"") + key + "\" is required and must be a string";
         return false;
@@ -156,20 +156,20 @@ bool require_string(const Value& args, const char* key, std::string& out, std::s
         error = describe(*value, key);
         return false;
     }
-    out = value->as_string();
+    out = value->get<std::string>();
     return true;
 }
 
 bool optional_int(const Value& args, const char* key, std::int64_t fallback, std::int64_t low,
                   std::int64_t high, std::int64_t& out, std::string& error) {
-    const Value* value = args.find(key);
+    const Value* value = find(args, key);
     out = fallback;
     if (!value || value->is_null()) return true;
-    if (!value->is_int()) {
+    if (!value->is_number_integer()) {
         error = describe(*value, key);
         return false;
     }
-    out = value->as_int();
+    out = value->get<std::int64_t>();
     if (out < low || out > high) {
         std::ostringstream os;
         os << "\"" << key << "\" must be between " << low << " and " << high << ", got " << out;
@@ -180,14 +180,14 @@ bool optional_int(const Value& args, const char* key, std::int64_t fallback, std
 }
 
 bool optional_bool(const Value& args, const char* key, bool fallback, bool& out, std::string& error) {
-    const Value* value = args.find(key);
+    const Value* value = find(args, key);
     out = fallback;
     if (!value || value->is_null()) return true;
-    if (!value->is_bool()) {
+    if (!value->is_boolean()) {
         error = describe(*value, key);
         return false;
     }
-    out = value->as_bool();
+    out = value->get<bool>();
     return true;
 }
 
@@ -303,7 +303,7 @@ bool plan_edits(const std::string& text, const Value& edits, std::string& out, s
         error = "\"edits\" must be an array of {oldText, newText} objects";
         return false;
     }
-    const Array& edits_array = edits.as_array();
+    const Array& edits_array = edits.get_ref<const Array&>();
     if (edits_array.empty()) {
         error = "\"edits\" must contain at least one edit";
         return false;
@@ -320,8 +320,8 @@ bool plan_edits(const std::string& text, const Value& edits, std::string& out, s
             return false;
         }
 
-        const Value* old_value = edit.find("oldText");
-        const Value* new_value = edit.find("newText");
+        const Value* old_value = find(edit, "oldText");
+        const Value* new_value = find(edit, "newText");
         if (!old_value || !old_value->is_string()) {
             error = where + ".oldText is required and must be a string";
             return false;
@@ -332,10 +332,10 @@ bool plan_edits(const std::string& text, const Value& edits, std::string& out, s
                 error = where + ".newText must be a string (use \"\" to delete)";
                 return false;
             }
-            new_text = new_value->as_string();
+            new_text = new_value->get<std::string>();
         }
 
-        const std::string& old_text = old_value->as_string();
+        const std::string& old_text = old_value->get<std::string>();
         if (old_text.empty()) {
             error = where + ".oldText must not be empty; an empty search string is ambiguous";
             return false;
@@ -709,9 +709,9 @@ void register_filesystem_tools(Dispatcher& dispatcher, const FileSystemOptions& 
                 }
                 if (looks_binary(original)) return ToolResult::error("refusing to edit a binary file");
 
-                const Value* edits = args.find("edits");
+                const Value* edits = find(args, "edits");
                 std::string updated;
-                if (!plan_edits(original, edits ? *edits : Value::make_null(), updated, error))
+                if (!plan_edits(original, edits ? *edits : Value(nullptr), updated, error))
                     return ToolResult::error(error);
 
                 if (!write_file(resolved, updated, false, error)) return ToolResult::error(error);

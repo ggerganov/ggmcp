@@ -1,4 +1,4 @@
-// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+// ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
 // SPDX-License-Identifier: MIT
 //
@@ -26,7 +26,7 @@ namespace {
 void print_usage(const char* argv0) {
     const std::string program = argv0 ? argv0 : "ggmcp";
     std::printf(
-        "%s %s - a Model Context Protocol server in dependency-free C++17\n"
+        "%s %s - a Model Context Protocol server built on vendored single-header libraries\n"
         "\n"
         "Usage:\n"
         "  %s [options]\n"

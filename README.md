@@ -1,8 +1,10 @@
 # ggmcp
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server in dependency-free
-C++17, served over **streamable HTTP**. No nlohmann/json, no cpp-httplib, no Boost —
-just the standard library and POSIX sockets.
+A [Model Context Protocol](https://modelcontextprotocol.io) server in C++17, served over
+**streamable HTTP**. JSON and HTTP come from two single-header libraries vendored in
+`vendor/` — [nlohmann/json](https://github.com/nlohmann/json) and
+[cpp-httplib](https://github.com/yhirose/cpp-httplib) — and the rest is the standard
+library. Nothing is downloaded at build time.
 
 Verified against a real MCP client: `pi mcp list` reports
 `ggmcp: connected, 4 tools` against this binary — or 8 with the file and shell tools
@@ -25,16 +27,16 @@ server needs is small:
 
 | Concern | Size here | Notes |
 | --- | --- | --- |
-| JSON codec | `src/json.cpp`, ~350 lines | the only genuinely unavoidable hand-rolled piece |
-| HTTP/1.1 server | `src/http_server.cpp`, ~530 lines | what "must be HTTP" costs you |
-| MCP dispatch | `src/protocol.cpp`, ~420 lines | 5 methods + session state |
+| JSON | `src/json.cpp` + `include/ggmcp/json.hpp`, ~170 lines over `vendor/nlohmann/json.hpp` | parsing, serialization, escaping and typing are nlohmann/json; the glue is a nesting-depth guard, a pointer-returning `find()`, and a `dump()` that replaces invalid UTF-8 instead of throwing |
+| HTTP/1.1 server | `src/http_server.cpp` + `include/ggmcp/http_server.hpp`, ~415 lines over `vendor/httplib.h` | sockets, framing, chunked bodies, keep-alive and the worker pool are cpp-httplib; the glue binds, routes everything to one handler and converts the two request/response types |
+| MCP dispatch | `src/protocol.cpp`, ~480 lines | 5 methods + session state |
 | HTTP transport glue | `src/mcp_http.hpp` | headers, Origin, status mapping |
 | File + shell tools | `src/filesystem_tools.cpp`, ~790 lines | not protocol at all: confinement, atomic writes, a shell with a timeout and a process group |
 | Bearer tokens | `src/auth.cpp`, ~340 lines | also not protocol: three sources, file rotation, a constant-time compare, the 401 and its metadata document |
 
-So the honest answer: **feasible and pleasant, at the cost of owning a JSON parser and a
-small HTTP server.** If your MCP server is a thin wrapper over something already in
-C++, this is the whole cost. If you need OAuth or sampling, budget more.
+So the honest answer: **feasible and pleasant, at the cost of two vendored headers and a
+thin layer of glue over each.** If your MCP server is a thin wrapper over something
+already in C++, this is the whole cost. If you need OAuth or sampling, budget more.
 
 ## Build
 
@@ -43,7 +45,8 @@ cmake -S . -B build && cmake --build build     # or: make
 ./build/ggmcp --help
 ```
 
-Requires a C++17 compiler and CMake ≥ 3.16. Nothing else.
+Requires a C++17 compiler and CMake ≥ 3.16. The two third-party headers are vendored
+in `vendor/`, so the build needs no network access and no package manager.
 
 ## Run
 
@@ -296,17 +299,20 @@ the project.
 
 ```
 include/ggmcp/
-  json.hpp         JSON value, parser, serializer
+  json.hpp         the JSON type: nlohmann::json, a depth guard, find()
   protocol.hpp     Dispatcher, Tool, ToolResult, Reply, JSON-RPC codes
-  http_server.hpp  minimal HTTP/1.1 server
+  http_server.hpp  Request, Response, HttpServer - the HTTP vocabulary
   auth.hpp         bearer tokens: sources, constant-time check, 401 + metadata documents
   mcp_http.hpp     streamable-HTTP transport, Origin/session/auth rules
   tools.hpp        demo tools, plus the file/shell tools and path confinement
   log.hpp          stderr logging (stdout is reserved for stdio protocol frames)
 src/               matching implementations
+src/json.cpp       parse() with the nesting cap, try_parse(), find()
+src/http_server.cpp    cpp-httplib behind HttpServer: bind, route, adapt
 src/filesystem_tools.cpp   read/write/edit/bash, realpath confinement, timed shell
 src/auth.cpp       token loading with rotation, the check, the challenge
 src/main.cpp       CLI and transport selection
+vendor/            nlohmann/json and cpp-httplib, one header each, with their licenses
 tests/test_main.cpp       in-process JSON + dispatcher checks
 tests/http_roundtrip.py   spawns the binary; drives HTTP and stdio end to end
 ```
@@ -326,7 +332,8 @@ rejection of conflicting flags, `Origin` rejection of `http://evil.example`,
 `Accept`/`Content-Type` negotiation, id echoing, three requests over one keep-alive
 connection, and a `Transfer-Encoding: chunked` request body reassembled in seven-byte
 chunks. It also checks that non-ASCII (`café 🚀`, tabs, newlines) survives the round trip
-through the hand-rolled JSON codec — the place where a hand-written parser usually leaks.
+through the JSON layer — where an escaping bug would show up, and a good place to
+prove the vendored one does not have one.
 
 The file and shell tools are covered from both sides. In-process: `confine_path` on
 relative, absolute, `.`/`..`, missing-tree and out-of-root-symlink inputs; the read/write/edit

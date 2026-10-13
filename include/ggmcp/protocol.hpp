@@ -1,4 +1,4 @@
-// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+// ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
 // SPDX-License-Identifier: MIT
 //
@@ -70,19 +70,19 @@ struct ToolResult {
     static ToolResult text(std::string body) {
         ToolResult r;
         Object block;
-        block["type"] = Value::make_string("text");
-        block["text"] = Value::make_string(std::move(body));
-        r.content.push_back(Value::make_object(std::move(block)));
+        block["type"] = Value("text");
+        block["text"] = Value(std::move(body));
+        r.content.push_back(Value(std::move(block)));
         return r;
     }
 
     static ToolResult json(std::string serialized) {
         ToolResult r;
         Object block;
-        block["type"] = Value::make_string("text");
-        block["text"] = Value::make_string(std::move(serialized));
-        block["mimeType"] = Value::make_string("application/json");
-        r.content.push_back(Value::make_object(std::move(block)));
+        block["type"] = Value("text");
+        block["text"] = Value(std::move(serialized));
+        block["mimeType"] = Value("application/json");
+        r.content.push_back(Value(std::move(block)));
         return r;
     }
 
@@ -106,8 +106,8 @@ struct Context {
 struct Tool {
     std::string name;
     std::string description;
-    Value input_schema = Value::make_object();   ///< JSON Schema for `arguments`
-    Value annotations = Value::make_null();      ///< MCP tool annotations, optional
+    Value input_schema = Value::object();   ///< JSON Schema for `arguments`
+    Value annotations = Value(nullptr);      ///< MCP tool annotations, optional
     std::function<ToolResult(const Value& arguments, const Context& ctx)> handler;
 };
 

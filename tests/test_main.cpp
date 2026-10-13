@@ -1,8 +1,8 @@
-// ggmcp - a tiny Model Context Protocol server in dependency-free C++17.
+// ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
 // SPDX-License-Identifier: MIT
 //
-// test_main.cpp - in-process tests for the JSON codec and the MCP dispatcher.
+// test_main.cpp - in-process tests for the JSON layer and the MCP dispatcher.
 // No sockets here; tests/http_roundtrip.py drives the HTTP transport.
 
 #include <cstdio>
@@ -19,6 +19,11 @@
 #include "ggmcp/mcp_http.hpp"
 #include "ggmcp/protocol.hpp"
 #include "ggmcp/tools.hpp"
+
+// ggmcp::Value is an alias for nlohmann::json, so the JSON lookup helpers
+// declared in namespace ggmcp are not reachable by ADL from this translation
+// unit - an alias does not add its spelling namespace to the lookup.
+using ggmcp::find;
 
 namespace {
 
@@ -58,66 +63,72 @@ void check_has(const std::string& haystack, const std::string& needle, const std
 void test_json_scalars() {
     group("json/scalars");
 
-    check(ggmcp::Value::parse("null").is_null(), "null parses");
-    check(ggmcp::Value::parse("true").as_bool(), "true parses");
-    check(!ggmcp::Value::parse("false").as_bool(), "false parses");
-    check_eq(std::to_string(ggmcp::Value::parse("42").as_int()), "42", "integer parses");
-    check_eq(std::to_string(ggmcp::Value::parse("-7").as_int()), "-7", "negative integer parses");
-    check(ggmcp::Value::parse("3.5").is_double(), "double parses");
-    check(ggmcp::Value::parse("1e3").is_double(), "exponent parses as double");
-    check(ggmcp::Value::parse("  \t\n 12 \r\n").is_int(), "surrounding whitespace is skipped");
+    check(ggmcp::parse("null").is_null(), "null parses");
+    check(ggmcp::parse("true").get<bool>(), "true parses");
+    check(!ggmcp::parse("false").get<bool>(), "false parses");
+    check_eq(std::to_string(ggmcp::parse("42").get<std::int64_t>()), "42", "integer parses");
+    check_eq(std::to_string(ggmcp::parse("-7").get<std::int64_t>()), "-7", "negative integer parses");
+    check(ggmcp::parse("3.5").is_number_float(), "double parses");
+    check(ggmcp::parse("1e3").is_number_float(), "exponent parses as double");
+    check(ggmcp::parse("  \t\n 12 \r\n").is_number_integer(), "surrounding whitespace is skipped");
 
     // An integer too wide for int64 degrades to a double rather than wrapping.
-    const ggmcp::Value huge = ggmcp::Value::parse("99999999999999999999");
-    check(huge.is_double(), "out-of-range integer falls back to double");
+    const ggmcp::Value huge = ggmcp::parse("99999999999999999999");
+    check(huge.is_number_float(), "out-of-range integer falls back to double");
 }
 
 void test_json_strings() {
     group("json/strings");
 
-    check_eq(ggmcp::Value::parse("\"plain\"").as_string(), "plain", "plain string");
-    check_eq(ggmcp::Value::parse("\"a\\nb\"").as_string(), "a\nb", "escape n");
-    check_eq(ggmcp::Value::parse("\"a\\\"b\"").as_string(), "a\"b", "escaped quote");
-    check_eq(ggmcp::Value::parse("\"a\\\\b\"").as_string(), "a\\b", "escaped backslash");
-    check_eq(ggmcp::Value::parse("\"\\u0041\"").as_string(), "A", "\\u escape");
+    check_eq(ggmcp::parse("\"plain\"").get<std::string>(), "plain", "plain string");
+    check_eq(ggmcp::parse("\"a\\nb\"").get<std::string>(), "a\nb", "escape n");
+    check_eq(ggmcp::parse("\"a\\\"b\"").get<std::string>(), "a\"b", "escaped quote");
+    check_eq(ggmcp::parse("\"a\\\\b\"").get<std::string>(), "a\\b", "escaped backslash");
+    check_eq(ggmcp::parse("\"\\u0041\"").get<std::string>(), "A", "\\u escape");
 
     // U+1F600 GRINNING FACE, written as a surrogate pair, must become 4-byte UTF-8.
-    const std::string emoji = ggmcp::Value::parse("\"\\ud83d\\ude00\"").as_string();
+    const std::string emoji = ggmcp::parse("\"\\ud83d\\ude00\"").get<std::string>();
     const std::string want_emoji = "\xF0\x9F\x98\x80";
     check_eq(emoji, want_emoji, "\\uXXXX surrogate pair decodes to UTF-8");
 
     // Raw UTF-8 in must survive, and raw UTF-8 out must not be escaped away.
     const std::string text = "\"caf\xC3\xA9\"";
-    check_eq(ggmcp::Value::parse(text).as_string(), "caf\xC3\xA9", "raw UTF-8 input decodes");
-    check_eq(ggmcp::Value::make_string("caf\xC3\xA9").dump(), "\"caf\xC3\xA9\"",
+    check_eq(ggmcp::parse(text).get<std::string>(), "caf\xC3\xA9", "raw UTF-8 input decodes");
+    check_eq(ggmcp::Value("caf\xC3\xA9").dump(), "\"caf\xC3\xA9\"",
              "raw UTF-8 output is not escaped");
 
+    // ggmcp::dump() is lenient where Value::dump() throws: a tool that echoes
+    // a byte which is not part of a character must still produce a body, so
+    // the byte becomes U+FFFD instead of an exception and a 500.
+    check_eq(ggmcp::dump(ggmcp::Value(std::string("a") + static_cast<char>(0xFF) + "z")),
+             "\"a\xEF\xBF\xBDz\"", "invalid UTF-8 is replaced with U+FFFD on dump");
+
     // Round trip through dump/parse.
-    const ggmcp::Value original = ggmcp::Value::parse("[\"a\\tb\",1.5,{\"k\":[true,null]}]");
-    const ggmcp::Value reparsed = ggmcp::Value::parse(original.dump());
+    const ggmcp::Value original = ggmcp::parse("[\"a\\tb\",1.5,{\"k\":[true,null]}]");
+    const ggmcp::Value reparsed = ggmcp::parse(original.dump());
     check(reparsed.is_array() && reparsed.size() == 3, "array round trip");
-    check_eq(reparsed.at(0)->as_string(), "a\tb", "nested string round trip");
-    check(reparsed.at(2)->find("k")->at(1)->is_null(), "nested null round trip");
+    check_eq(reparsed.at(0).get<std::string>(), "a\tb", "nested string round trip");
+    check(find(reparsed.at(2), "k")->at(1).is_null(), "nested null round trip");
 }
 
 void test_json_containers() {
     group("json/containers");
 
-    const ggmcp::Value empty_array = ggmcp::Value::parse("[]");
+    const ggmcp::Value empty_array = ggmcp::parse("[]");
     check(empty_array.is_array() && empty_array.size() == 0, "empty array");
 
-    const ggmcp::Value empty_object = ggmcp::Value::parse("{}");
+    const ggmcp::Value empty_object = ggmcp::parse("{}");
     check(empty_object.is_object() && empty_object.size() == 0, "empty object");
 
-    const ggmcp::Value object = ggmcp::Value::parse("{\"b\":1,\"a\":2}");
+    const ggmcp::Value object = ggmcp::parse("{\"b\":1,\"a\":2}");
     check(object.is_object() && object.size() == 2, "object with two keys");
     check_eq(object.dump(), "{\"a\":2,\"b\":1}", "object keys serialize in sorted order");
 
     // Sorted keys make server responses byte-stable, which makes tests easy.
-    check_eq(ggmcp::Value::parse("{\"x\":\"\\u00e9\"}").dump(), "{\"x\":\"\xC3\xA9\"}", "dump emits UTF-8");
+    check_eq(ggmcp::parse("{\"x\":\"\\u00e9\"}").dump(), "{\"x\":\"\xC3\xA9\"}", "dump emits UTF-8");
 
     // Control characters must be escaped on output to stay valid JSON.
-    check_eq(ggmcp::Value::make_string(std::string("a") + static_cast<char>(0x01) + "b").dump(),
+    check_eq(ggmcp::Value(std::string("a") + static_cast<char>(0x01) + "b").dump(),
              "\"a\\u0001b\"", "control characters are escaped");
 }
 
@@ -131,7 +142,7 @@ void test_json_errors() {
     for (const auto& text : bad) {
         ggmcp::Value value;
         std::string error;
-        const bool ok = ggmcp::Value::try_parse(text, value, error);
+        const bool ok = ggmcp::try_parse(text, value, error);
         check(!ok, "rejects \"" + text + "\"");
     }
 
@@ -142,7 +153,7 @@ void test_json_depth_limit() {
     ggmcp::Value value;
     std::string error;
     const std::string deep(200, '[');
-    check(!ggmcp::Value::try_parse(deep, value, error), "deeply nested arrays are rejected");
+    check(!ggmcp::try_parse(deep, value, error), "deeply nested arrays are rejected");
     check(contains(error, "deep"), "depth error mentions depth");
 }
 
@@ -185,24 +196,24 @@ void test_initialize() {
 
     ggmcp::Value message;
     std::string error;
-    check(ggmcp::Value::try_parse(reply.body, message, error), "initialize reply is valid JSON");
+    check(ggmcp::try_parse(reply.body, message, error), "initialize reply is valid JSON");
 
-    const ggmcp::Value* result = message.find("result");
+    const ggmcp::Value* result = find(message, "result");
     check(result != nullptr, "initialize returns a result member");
     if (!result) return;
 
-    check_eq(result->find("protocolVersion")->as_string(), "2025-06-18", "echoes a supported version");
-    check(result->find("capabilities")->contains("tools"), "advertises the tools capability");
-    check_eq(result->find("serverInfo")->find("name")->as_string(), "test-server", "reports serverInfo.name");
-    check_eq(std::to_string(message.find("id")->as_int()), "1", "echoes the request id");
+    check_eq(find(result, "protocolVersion")->get<std::string>(), "2025-06-18", "echoes a supported version");
+    check(find(result, "capabilities")->contains("tools"), "advertises the tools capability");
+    check_eq(find(find(result, "serverInfo"), "name")->get<std::string>(), "test-server", "reports serverInfo.name");
+    check_eq(std::to_string(find(message, "id")->get<std::int64_t>()), "1", "echoes the request id");
     check(!message.contains("error"), "initialize has no error member");
 
     // An unsupported version must fall back to the newest one we speak.
     ggmcp::Context other = http_context();
     const ggmcp::Reply fallback = dispatcher.handle(initialize_body("1999-01-01"), other);
     ggmcp::Value fallback_message;
-    check(ggmcp::Value::try_parse(fallback.body, fallback_message, error), "fallback reply parses");
-    check_eq(fallback_message.find("result")->find("protocolVersion")->as_string(),
+    check(ggmcp::try_parse(fallback.body, fallback_message, error), "fallback reply parses");
+    check_eq(find(find(fallback_message, "result"), "protocolVersion")->get<std::string>(),
              ggmcp::latest_protocol_version(), "unknown version falls back to the latest supported");
 }
 
@@ -259,25 +270,25 @@ void test_tools_list() {
 
     ggmcp::Value message;
     std::string error;
-    check(ggmcp::Value::try_parse(reply.body, message, error), "tools/list reply parses");
+    check(ggmcp::try_parse(reply.body, message, error), "tools/list reply parses");
 
-    const ggmcp::Value* tools = message.find("result")->find("tools");
+    const ggmcp::Value* tools = find(find(message, "result"), "tools");
     check(tools && tools->is_array(), "tools is an array");
     if (!tools) return;
     check_eq(std::to_string(tools->size()), "4", "four demo tools are listed");
 
     for (std::size_t i = 0; i < tools->size(); ++i) {
-        const ggmcp::Value* tool = tools->at(i);
-        check(tool->find("name") && tool->find("name")->is_string(), "tool has a name");
-        check(tool->find("description") && tool->find("description")->is_string(), "tool has a description");
-        const ggmcp::Value* schema = tool->find("inputSchema");
+        const ggmcp::Value& tool = tools->at(i);
+        check(find(tool, "name") && find(tool, "name")->is_string(), "tool has a name");
+        check(find(tool, "description") && find(tool, "description")->is_string(), "tool has a description");
+        const ggmcp::Value* schema = find(tool, "inputSchema");
         check(schema && schema->is_object(), "tool has an inputSchema object");
         if (schema) {
-            check(schema->find("type") && schema->find("type")->as_string() == "object",
+            check(find(schema, "type") && find(schema, "type")->get<std::string>() == "object",
                   "inputSchema.type is object");
-            check(schema->find("properties") && schema->find("properties")->is_object(),
+            check(find(schema, "properties") && find(schema, "properties")->is_object(),
                   "inputSchema has properties");
-            check(schema->find("required") && schema->find("required")->is_array(),
+            check(find(schema, "required") && find(schema, "required")->is_array(),
                   "inputSchema has a required array");
         }
     }
@@ -303,20 +314,20 @@ void test_tools_call() {
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"hello\","
         "\"arguments\":{}}}",
         http_context(session));
-    check(ggmcp::Value::try_parse(hello.body, message, error), "hello reply parses");
-    const ggmcp::Value* content = message.find("result")->find("content");
+    check(ggmcp::try_parse(hello.body, message, error), "hello reply parses");
+    const ggmcp::Value* content =find(find(message, "result"), "content");
     check(content && content->is_array() && content->size() == 1, "hello returns one content block");
-    check_eq(content->at(0)->find("type")->as_string(), "text", "content block type is text");
-    check_has(content->at(0)->find("text")->as_string(), "Hello, world!", "hello greets the world");
-    check(!message.find("result")->find("isError")->as_bool(), "hello is not an error");
+    check_eq(find(content->at(0), "type")->get<std::string>(), "text", "content block type is text");
+    check_has(find(content->at(0), "text")->get<std::string>(), "Hello, world!", "hello greets the world");
+    check(!find(find(message, "result"), "isError")->get<bool>(), "hello is not an error");
 
     // hello with a name and loud=true.
     const ggmcp::Reply loud = dispatcher.handle(
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"hello\","
         "\"arguments\":{\"name\":\"Ada Lovelace\",\"loud\":true}}}",
         http_context(session));
-    check(ggmcp::Value::try_parse(loud.body, message, error), "loud reply parses");
-    const std::string loud_text = message.find("result")->find("content")->at(0)->find("text")->as_string();
+    check(ggmcp::try_parse(loud.body, message, error), "loud reply parses");
+    const std::string loud_text = find(find(find(message, "result"), "content")->at(0), "text")->get<std::string>();
     check_has(loud_text, "HELLO, ADA LOVELACE!", "loud greets in upper case");
     check_has(loud_text, "http", "the greeting names the transport");
 
@@ -325,8 +336,8 @@ void test_tools_call() {
         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\","
         "\"arguments\":{\"message\":\"caf\\u00e9 \\ud83d\\ude80\"}}}",
         http_context(session));
-    check(ggmcp::Value::try_parse(unicode.body, message, error), "unicode echo reply parses");
-    check_eq(message.find("result")->find("content")->at(0)->find("text")->as_string(),
+    check(ggmcp::try_parse(unicode.body, message, error), "unicode echo reply parses");
+    check_eq(find(find(find(message, "result"), "content")->at(0), "text")->get<std::string>(),
              "caf\xC3\xA9 \xF0\x9F\x9A\x80", "echo round-trips non-ASCII");
 
     // A missing required argument is a tool-level error, not a protocol error.
@@ -334,9 +345,9 @@ void test_tools_call() {
         "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\","
         "\"arguments\":{}}}",
         http_context(session));
-    check(ggmcp::Value::try_parse(missing.body, message, error), "missing-argument reply parses");
-    check(message.find("result") != nullptr, "missing argument still returns a result");
-    check(message.find("result")->find("isError")->as_bool(), "missing argument sets isError");
+    check(ggmcp::try_parse(missing.body, message, error), "missing-argument reply parses");
+    check(find(message, "result") != nullptr, "missing argument still returns a result");
+    check(find(find(message, "result"), "isError")->get<bool>(), "missing argument sets isError");
 
     // An unknown tool is a JSON-RPC error at HTTP 200, so clients show the text.
     const ggmcp::Reply unknown = dispatcher.handle(
@@ -569,26 +580,26 @@ ToolCall call_tool(ggmcp::Dispatcher& dispatcher, const std::string& session, co
 
     ggmcp::Value message;
     std::string error;
-    if (!ggmcp::Value::try_parse(reply.body, message, error)) {
+    if (!ggmcp::try_parse(reply.body, message, error)) {
         call.is_error = true;
         return call;
     }
 
-    const ggmcp::Value* jsonrpc_error = message.find("error");
+    const ggmcp::Value* jsonrpc_error = find(message, "error");
     if (jsonrpc_error != nullptr) {   // an unknown tool is a protocol error, not a tool error
         call.is_error = true;
-        const ggmcp::Value* message_text = jsonrpc_error->find("message");
-        if (message_text != nullptr && message_text->is_string()) call.text = message_text->as_string();
+        const ggmcp::Value* message_text = find(jsonrpc_error, "message");
+        if (message_text != nullptr && message_text->is_string()) call.text = message_text->get<std::string>();
         return call;
     }
 
-    const ggmcp::Value* result = message.find("result");
-    const ggmcp::Value* is_error = result == nullptr ? nullptr : result->find("isError");
-    call.is_error = is_error != nullptr && is_error->as_bool();
-    const ggmcp::Value* content = result == nullptr ? nullptr : result->find("content");
+    const ggmcp::Value* result = find(message, "result");
+    const ggmcp::Value* is_error = result == nullptr ? nullptr : find(result, "isError");
+    call.is_error = is_error != nullptr && is_error->get<bool>();
+    const ggmcp::Value* content = result == nullptr ? nullptr : find(result, "content");
     if (content != nullptr && content->is_array() && content->size() > 0) {
-        const ggmcp::Value* text = content->at(0)->find("text");
-        if (text != nullptr && text->is_string()) call.text = text->as_string();
+        const ggmcp::Value* text = find(content->at(0), "text");
+        if (text != nullptr && text->is_string()) call.text = text->get<std::string>();
     }
     return call;
 }
