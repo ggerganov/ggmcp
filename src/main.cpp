@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // main.cpp - command line and transport selection. The defaults are a server
 // you can just run: MCP streamable HTTP on 0.0.0.0:8081, read/write/edit
 // confined to your home directory, the shell tool on, Origin unchecked. Every

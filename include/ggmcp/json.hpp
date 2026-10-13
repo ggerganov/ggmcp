@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // json.hpp - the JSON type this project speaks.
 //
 // There is no bespoke JSON implementation here: Value *is* nlohmann::json

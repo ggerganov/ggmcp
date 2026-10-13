@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // http_server.cpp - cpp-httplib (vendor/httplib.h) behind ggmcp's HttpServer.
 //
 // Everything that used to live here is gone: no socket(), no poll(), no

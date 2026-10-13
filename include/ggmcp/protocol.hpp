@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // protocol.hpp - MCP 2025-06-18 request handling, independent of transport.
 //
 // The dispatcher knows nothing about sockets or pipes: it takes a JSON-RPC

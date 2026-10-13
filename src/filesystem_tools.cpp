@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // filesystem_tools.cpp - read / write / edit / bash.
 //
 // The tool names mirror the ones common agent harnesses ship, but the security

@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // http_server.hpp - the HTTP surface this project serves.
 //
 // The protocol work - reading requests off a socket, parsing the request line

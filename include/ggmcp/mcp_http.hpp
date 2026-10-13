@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // mcp_http.hpp - MCP "streamable HTTP" transport on top of HttpServer.
 //
 // Wire rules implemented here (protocol version 2025-06-18):

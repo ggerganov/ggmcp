@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // auth.hpp - bearer-token authorization for the HTTP transport.
 //
 // This is the *resource server* half of MCP's authorization model, which is the

@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // log.hpp - stderr logging. stdout is the stdio protocol channel and must
 // never receive anything but JSON-RPC frames, so all diagnostics go elsewhere.
 

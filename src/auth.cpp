@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // auth.cpp - bearer-token checks. See auth.hpp for what this does and does not
 // do about authorization; the short version is that it validates secrets it was
 // handed and advertises protected-resource metadata, and issues no tokens.

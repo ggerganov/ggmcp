@@ -1,6 +1,4 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
-//
-// SPDX-License-Identifier: MIT
 
 #include "ggmcp/protocol.hpp"
 

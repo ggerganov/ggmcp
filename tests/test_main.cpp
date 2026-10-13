@@ -1,7 +1,5 @@
 // ggmcp - a tiny Model Context Protocol server built on vendored single-header libraries.
 //
-// SPDX-License-Identifier: MIT
-//
 // test_main.cpp - in-process tests for the JSON layer and the MCP dispatcher.
 // No sockets here; tests/http_roundtrip.py drives the HTTP transport.
 
