@@ -33,6 +33,7 @@ headers under `vendor/`, so no download or package manager is needed.
 | `--host ADDR` | `0.0.0.0` | address to bind |
 | `--port N` | `8081` | port to bind, `0` picks a free one |
 | `--endpoint PATH` | `/mcp` | JSON-RPC endpoint |
+| `--alias ALIAS` | `mcp` | publish tools as `ALIAS-<tool>`; empty publishes bare names |
 | `--session-policy POLICY` | `lenient` | `lenient`, `strict` or `stateless` |
 | `--fs-root PATH` | `$HOME` | root the file tools are confined to |
 | `--allow-outside-root` | off | drop file tool confinement |
@@ -123,9 +124,19 @@ The stdio transport never tracks sessions: it behaves like `stateless` whatever
 
 ## Tools
 
+Tools are published with an alias prefix: `--alias` (default `mcp`) turns `bash`
+into `mcp-bash` and `hello` into `mcp-hello`. `tools/list` publishes the prefixed
+names and `tools/call` accepts exactly those; calling a bare `bash` is an unknown
+tool, and the error names the prefix in use. `--alias ''` drops the prefix, and
+`/health`, the index page and the start up banner report the alias in force.
+
+```sh
+./build/ggmcp --alias studio        # studio-bash, studio-echo, studio-read, ...
+```
+
 Always on:
 
-| Tool | Arguments | Result |
+| Bare name | Arguments | Result |
 | --- | --- | --- |
 | `hello` | `name?`, `loud?` | `Hello, <name>!`, upper cased when `loud` |
 | `echo` | `message` | the message unchanged |
@@ -134,7 +145,7 @@ Always on:
 
 With `--no-file-tools` removed (the default) the file tools join:
 
-| Tool | Arguments | Result |
+| Bare name | Arguments | Result |
 | --- | --- | --- |
 | `read` | `path`, `offset?`, `limit?` | the selected lines, `offset` is 1 based |
 | `write` | `path`, `content`, `append?` | atomic replace or append (temp file plus rename) |

@@ -34,6 +34,7 @@ struct Options {
     std::string serverName = "ggmcp";
     std::string serverTitle = "ggmcp";
     std::string serverVersion = GGMCP_VERSION;
+    std::string alias = "mcp";               // published tool names are "<alias>-<tool>"
     std::string instructions = "Use the tools to read, write and edit files under the root.";
 
     Transport transport = Transport::Http;

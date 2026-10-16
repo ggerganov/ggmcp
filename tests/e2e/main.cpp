@@ -19,10 +19,30 @@ namespace {
 using ggt::Reply;
 using ggt::RequestOptions;
 
+// The default --alias. Tool names reach the wire as "<alias>-<tool>".
+const char* const kAlias = "mcp";
+
+std::string publish(const std::string& tool) {
+    return std::string(kAlias) + "-" + tool;
+}
+
+std::vector<std::string> withAlias(const std::string& alias,
+                                   const std::vector<std::string>& tools) {
+    std::vector<std::string> published;
+    for (const auto& tool : tools) {
+        published.push_back(alias.empty() ? tool : alias + "-" + tool);
+    }
+    return published;
+}
+
+std::vector<std::string> publish(const std::vector<std::string>& tools) {
+    return withAlias(kAlias, tools);
+}
+
 const std::vector<std::string> kCoreTools = {"echo", "hello", "utc_now", "whoami"};
 const std::vector<std::string> kFileTools = {"edit", "read", "write"};
-const std::vector<std::string> kAllTools = {"bash",  "echo", "edit",   "hello",
-                                            "read", "utc_now", "whoami", "write"};
+const std::vector<std::string> kAllTools = {"bash",    "echo",  "edit",   "hello",
+                                            "read",    "utc_now", "whoami", "write"};
 
 std::string request(const std::string& id, const std::string& method,
                     const std::string& params = {}) {
@@ -43,9 +63,16 @@ std::string notification(const std::string& method, const std::string& params = 
     return out;
 }
 
+// Sends a tool call for a bare tool name, published with the server's alias.
 std::string callToolBody(const std::string& tool, const std::string& arguments) {
     return request("7", "tools/call",
-                   R"({"name":")" + tool + R"(","arguments":)" + arguments + "}");
+                   R"({"name":")" + publish(tool) + R"(","arguments":)" + arguments + "}");
+}
+
+// Like callToolBody, but sends the name exactly as given.
+std::string rawCallBody(const std::string& name, const std::string& arguments) {
+    return request("7", "tools/call",
+                   R"({"name":")" + name + R"(","arguments":)" + arguments + "}");
 }
 
 RequestOptions headers(std::vector<std::string> extra) {
@@ -126,6 +153,7 @@ void testHealthAndIndex() {
     EXPECT(health.json().at("endpoint").asString() == "/mcp", health.body);
     EXPECT(health.json().at("policy").asString() == "lenient", health.body);
     EXPECT(health.bodyHas("uptimeSeconds"), health.body);
+    EXPECT(health.json().at("alias").asString() == kAlias, health.body);
 
     const Reply index = ggt::get(server.port(), "/");
     EXPECT(index.status == 200, index.body);
@@ -133,6 +161,7 @@ void testHealthAndIndex() {
            index.header("Content-Type"));
     EXPECT(index.bodyHas("POST /mcp"), index.body);
     EXPECT(index.bodyHas("bash"), index.body);
+    EXPECT(index.bodyHas(std::string("alias: ") + kAlias), index.body);
 
     const Reply missing = ggt::get(server.port(), "/nope");
     EXPECT(missing.status == 404, missing.body);
@@ -151,14 +180,14 @@ void testRequestsBeforeHandshake() {
     const Reply listed = ggt::postJson(server.port(), request("1", "tools/list"));
     EXPECT(listed.status == 200, listed.body);
     EXPECT(listed.header("Mcp-Session-Id").empty(), listed.header("Mcp-Session-Id"));
-    EXPECT(containsAll(toolNames(listed), kCoreTools), joined(toolNames(listed)));
+    EXPECT(containsAll(toolNames(listed), publish(kCoreTools)),
+           joined(toolNames(listed)));
 
     const Reply ping = ggt::postJson(server.port(), request("2", "ping"));
     EXPECT(ping.status == 200, ping.body);
     EXPECT(ping.bodyHas(R"("result":{})"), ping.body);
 
-    const Reply called = ggt::postJson(
-        server.port(), request("3", "tools/call", R"({"name":"hello","arguments":{}})"));
+    const Reply called = ggt::postJson(server.port(), callToolBody("hello", "{}"));
     EXPECT(called.status == 200, called.body);
     EXPECT(firstText(called) == "Hello, world!", firstText(called));
 }
@@ -391,7 +420,7 @@ void testToolLists() {
         ggt::Server server({"--fs-root", root});
         const Reply listed = ggt::postJson(server.port(), request("1", "tools/list"));
         const std::vector<std::string> names = toolNames(listed);
-        EXPECT(names == kAllTools, joined(names));
+        EXPECT(names == publish(kAllTools), joined(names));
         EXPECT(listed.bodyHas("inputSchema"), listed.body);
         EXPECT(listed.bodyHas("\"required\""), listed.body);
     }
@@ -400,7 +429,7 @@ void testToolLists() {
         ggt::Server server({"--fs-root", root, "--no-file-tools", "--no-bash"});
         const Reply listed = ggt::postJson(server.port(), request("1", "tools/list"));
         const std::vector<std::string> names = toolNames(listed);
-        EXPECT(names == kCoreTools, joined(names));
+        EXPECT(names == publish(kCoreTools), joined(names));
 
         const Reply read = ggt::postJson(server.port(), callToolBody("read", R"({"path":"x"})"));
         EXPECT(read.status == 200, read.body);
@@ -427,9 +456,10 @@ void testToolLists() {
 
     {
         ggt::Server server({"--fs-root", root, "--no-file-tools"});
+        const std::vector<std::string> fileTools = publish(kFileTools);
         std::vector<std::string> expected;
-        for (const auto& name : kAllTools) {
-            if (std::find(kFileTools.begin(), kFileTools.end(), name) == kFileTools.end()) {
+        for (const auto& name : publish(kAllTools)) {
+            if (std::find(fileTools.begin(), fileTools.end(), name) == fileTools.end()) {
                 expected.push_back(name);
             }
         }
@@ -646,6 +676,90 @@ void testOriginPolicies() {
                         headers({"Mcp-Session-Id: x", "Origin: http://bad.example"}));
         EXPECT(teardown.status == 403, teardown.body);
     }
+}
+
+// ---------------------------------------------------------------- tool alias
+
+void testToolAlias() {
+    const std::string root = ggt::tempRoot("alias");
+
+    {
+        ggt::Server server({"--fs-root", root});
+        const std::vector<std::string> names =
+            toolNames(ggt::postJson(server.port(), request("1", "tools/list")));
+        EXPECT(names == publish(kAllTools), joined(names));
+        EXPECT(std::all_of(names.begin(), names.end(), [](const std::string& name) {
+                   return name.compare(0, 4, "mcp-") == 0;
+               }),
+               joined(names));
+
+        const Reply published = ggt::postJson(server.port(), callToolBody("echo",
+                                                                         R"({"message":"hi"})"));
+        EXPECT(firstText(published) == "hi", published.body);
+
+        const Reply bare = ggt::postJson(server.port(), rawCallBody("echo", R"({"message":"hi"})"));
+        EXPECT(bare.json().at("error").at("code").asInt() == -32602, bare.body);
+        EXPECT(bare.bodyHas("mcp-<tool>"), bare.body);
+
+        const Reply disabled = ggt::postJson(server.port(), callToolBody("bash",
+                                                                         R"({"command":"true"})"));
+        EXPECT(!disabled.bodyHas("--no-bash"), disabled.body);
+    }
+
+    {
+        ggt::Server server({"--fs-root", root, "--alias", "studio"});
+        const std::vector<std::string> names =
+            toolNames(ggt::postJson(server.port(), request("1", "tools/list")));
+        EXPECT(names == withAlias("studio", kAllTools), joined(names));
+
+        const Reply called =
+            ggt::postJson(server.port(),
+                          rawCallBody("studio-hello", R"({"name":"studio"})"));
+        EXPECT(firstText(called) == "Hello, studio!", firstText(called));
+
+        const Reply oldAlias = ggt::postJson(server.port(), callToolBody("hello", "{}"));
+        EXPECT(oldAlias.json().at("error").at("code").asInt() == -32602, oldAlias.body);
+        EXPECT(oldAlias.bodyHas("studio-<tool>"), oldAlias.body);
+
+        EXPECT(ggt::get(server.port(), "/health").bodyHas("\"alias\":\"studio\""),
+               ggt::get(server.port(), "/health").body);
+        EXPECT(ggt::get(server.port(), "/").bodyHas("alias: studio"),
+               ggt::get(server.port(), "/").body);
+        EXPECT(server.log().find("alias:         studio") != std::string::npos, server.log());
+    }
+
+    {
+        ggt::Server server({"--fs-root", root, "--alias", ""});
+        const std::vector<std::string> names =
+            toolNames(ggt::postJson(server.port(), request("1", "tools/list")));
+        EXPECT(names == std::vector<std::string>({"bash", "echo", "edit", "hello", "read",
+                                                 "utc_now", "whoami", "write"}),
+               joined(names));
+        EXPECT(ggt::get(server.port(), "/").bodyHas("alias: none"),
+               ggt::get(server.port(), "/").body);
+    }
+
+    {
+        ggt::Server server({"--fs-root", root, "--alias", "gg", "--no-bash"});
+        const Reply bash = ggt::postJson(server.port(), rawCallBody("gg-bash",
+                                                                    R"({"command":"true"})"));
+        EXPECT(bash.bodyHas("--no-bash"), bash.body);
+        EXPECT(bash.bodyHas("gg-bash"), bash.body);
+    }
+
+    const std::vector<std::pair<std::vector<std::string>, std::string>> cases = {
+        {{"--alias"}, "needs a value"},
+        {{"--alias", "two words"}, "single word"},
+        {{"--alias", "a/b"}, "single word"},
+    };
+    for (const auto& testCase : cases) {
+        const ggt::Process process = ggt::runBinary(testCase.first);
+        EXPECT(process.exitCode == 2, testCase.first.back() + " -> " + process.output);
+        EXPECT(process.output.find(testCase.second) != std::string::npos, process.output);
+    }
+
+    const ggt::Process help = ggt::runBinary({"--help"});
+    EXPECT(help.output.find("--alias ALIAS") != std::string::npos, help.output);
 }
 
 // --------------------------------------------------------------------- CORS
@@ -961,23 +1075,18 @@ void testStdioTransport() {
     for (const auto& tool : listed.at("result").at("tools").items()) {
         names.push_back(tool.at("name").asString());
     }
-    EXPECT(names == kAllTools, joined(names));
+    EXPECT(names == publish(kAllTools), joined(names));
 
-    session.send(request("4", "tools/call",
-                         R"({"name":"whoami","arguments":{}})"));
-    const gg::Json whoami = gg::Json::parse(session.receive());
-    const std::string text =
-        whoami.at("result").at("content")[0].at("text").asString();
+    session.send(callToolBody("whoami", "{}"));
+    const std::string text = lineText(session.receive());
     EXPECT(text.find("\"transport\":\"stdio\"") != std::string::npos, text);
     EXPECT(text.find("\"stateless\"") != std::string::npos, text);
 
-    session.send(request("5", "tools/call",
-                         R"({"name":"write","arguments":{"path":"stdio.txt","content":"from stdio\n"}})"));
+    session.send(callToolBody("write", R"({"path":"stdio.txt","content":"from stdio"})"));
     const std::string written = lineText(session.receive());
     EXPECT(written.find("\"created\":true") != std::string::npos, written);
 
-    session.send(request("6", "tools/call",
-                         R"({"name":"read","arguments":{"path":"stdio.txt"}})"));
+    session.send(callToolBody("read", R"({"path":"stdio.txt"})"));
     EXPECT(lineText(session.receive()) == "from stdio\n", "read over stdio");
 
     session.send(request("7", "unknown/method"));
@@ -1010,6 +1119,7 @@ int main(int argc, char** argv) {
             {"methods, ping and json-rpc errors", testMethodsAndErrors},
             {"tools offered by default and when disabled", testToolLists},
             {"core tools", testCoreTools},
+            {"tool name alias", testToolAlias},
             {"file tools against a temporary root", testFileTools},
             {"bash tool", testBashTool},
             {"--allow-outside-root", testOutsideRoot},

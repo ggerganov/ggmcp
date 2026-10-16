@@ -265,11 +265,15 @@ Outbound Protocol::handleToolsCall(const Json& id, const Json& params, const Inb
     const std::string name = params.at("name").asString();
     const Tool* tool = tools_.find(name);
     if (tool == nullptr) {
+        const std::string bare = tools_.bare(name);
         std::string hint = "unknown tool '" + name + "'";
-        if (!options_.fileTools && (name == "read" || name == "write" || name == "edit")) {
+        if (!options_.alias.empty() && name == bare) {
+            hint += ", this server publishes tools as '" + options_.alias + "-<tool>'";
+        }
+        if (!options_.fileTools && (bare == "read" || bare == "write" || bare == "edit")) {
             hint += ", the file tools are turned off by --no-file-tools";
         }
-        if (!options_.bashTool && name == "bash") {
+        if (!options_.bashTool && bare == "bash") {
             hint += ", the bash tool is turned off by --no-bash";
         }
         Json available = Json::array();

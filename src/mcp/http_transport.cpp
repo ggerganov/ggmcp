@@ -232,6 +232,7 @@ std::shared_ptr<http::Router> makeRouter(const Options& options, Protocol& proto
                                                 {"policy", toString(settings.sessionPolicy)},
                                                 {"root", settings.root()},
                                                 {"token", authorizer.sourceDescription()},
+                                                {"alias", settings.alias},
                                                 {"tools", toolNames},
                                                 {"cors", settings.cors}});
                     return finish(request, settings, http::Response::json(200, health));
@@ -266,7 +267,9 @@ std::shared_ptr<http::Router> makeRouter(const Options& options, Protocol& proto
                          << "</code> &mdash; health</li>"
                          << "<li><code>GET " << htmlEscape(settings.metadataPath)
                          << "</code> &mdash; protected resource metadata</li></ul>"
-                         << "<h2>Tools</h2><p>" << htmlEscape(toolNames) << "</p>"
+                         << "<h2>Tools</h2><p>alias: "
+                         << (settings.alias.empty() ? "none" : htmlEscape(settings.alias))
+                         << "</p><p>" << htmlEscape(toolNames) << "</p>"
                          << "<p>session policy: " << toString(settings.sessionPolicy) << "</p>"
                          << "</body></html>";
                     http::Response response = http::Response::empty(200);
@@ -289,6 +292,7 @@ std::shared_ptr<http::Router> makeRouter(const Options& options, Protocol& proto
 HttpServer::HttpServer(Options options)
     : options_(std::move(options)), authorizer_(options_) {
     registerBuiltins(tools_, options_);
+    tools_.setAlias(options_.alias);
     protocol_ = std::make_unique<Protocol>(options_, tools_, sessions_);
 }
 
@@ -350,6 +354,8 @@ std::string HttpServer::describe() const {
         << "  root:          " << options_.root()
         << (options_.allowOutsideRoot ? " (not enforced, --allow-outside-root)" : "") << "\n"
         << "  authorization: " << authorizer_.sourceDescription() << "\n"
+        << "  alias:         " << (options_.alias.empty() ? std::string("none") : options_.alias)
+        << "\n"
         << "  tools:         " << describeTools(tools_);
     return out.str();
 }

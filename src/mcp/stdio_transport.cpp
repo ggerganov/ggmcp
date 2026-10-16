@@ -15,6 +15,7 @@ bool runStdio(const Options& options, std::string& error) {
 
     ToolRegistry tools;
     registerBuiltins(tools, settings);
+    tools.setAlias(settings.alias);
     SessionStore sessions;
     Authorizer authorizer(settings);
     Protocol protocol(settings, tools, sessions);

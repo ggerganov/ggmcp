@@ -95,7 +95,7 @@ std::string usageText() {
            "              [--require-token] [--token-env NAME | --token-file PATH | --token-stdin]\n"
            "              [--strict-origin] [--allow-origin ORIGIN] [--no-cors] "
            "[--bash-timeout N]\n"
-           "              [--name NAME] [--title TITLE] [--instructions TEXT] "
+           "              [--alias ALIAS] [--name NAME] [--title TITLE] [--instructions TEXT] "
            "[--json-backend NAME] [--http-backend NAME]\n"
            "              [--quiet] [--verbose]";
 }
@@ -126,6 +126,7 @@ std::string helpText() {
         << "  --token-file PATH           read the token from a file, re-read on change\n"
         << "  --token-stdin               read the token from the first line of stdin\n"
         << "\nServer info\n"
+        << "  --alias ALIAS               publish tools as ALIAS-<tool>, default 'mcp', empty for none\n"
         << "  --name NAME                 serverInfo.name, default ggmcp\n"
         << "  --title TITLE               human readable title\n"
         << "  --instructions TEXT         instructions handed to clients\n"
@@ -172,6 +173,16 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error,
             options.strictOrigin = true;
         } else if (flag == "--no-cors") {
             options.cors = false;
+        } else if (flag == "--alias") {
+            std::string value;
+            if (!needValue(flag, index, argc, argv, value)) {
+                return false;
+            }
+            if (value.find_first_of(" \t/") != std::string::npos) {
+                error = "--alias needs a single word without spaces or '/', got '" + value + "'";
+                return false;
+            }
+            options.alias = value;
         } else if (flag == "--require-token") {
             options.requireToken = true;
         } else if (flag == "--token-stdin") {

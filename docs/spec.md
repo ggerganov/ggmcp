@@ -32,6 +32,12 @@ A Model Context Protocol server in C++17, served over streamable HTTP.
 
 ## Tools
 
+Every tool is published as `<alias>-<tool>`, so `bash` reaches the wire as
+`mcp-bash`. The alias defaults to `mcp`, `--alias ALIAS` changes it and an empty
+`--alias` publishes the bare names. `tools/list` publishes the prefixed names and
+`tools/call` accepts only what it published; a bare name is an unknown tool, and
+the error says which prefix this server publishes.
+
 Always on:
 
 - `hello` — greets, optional `name` and `loud`
@@ -117,6 +123,7 @@ The server is started as a real process and driven over the wire.
 - Command-line flag validation
 - File and shell tools against a temporary root
 - Tools offered by default and under `--no-file-tools --no-bash`
+- Tool name alias: default `mcp`, `--alias`, empty alias, unknown bare name
 - Origin policies, including `--strict-origin`
 - CORS preflight and headers, the `401` path and `--no-cors`
 - Bearer tokens, including the `401` path

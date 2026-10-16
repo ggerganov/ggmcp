@@ -40,17 +40,27 @@ struct Tool {
     std::function<ToolResult(const ToolContext&, const Json&)> handler;
 };
 
+// Tools are registered by their bare name and published as "<alias>-<name>".
+// An empty alias publishes the bare names.
 class ToolRegistry {
 public:
+    void setAlias(const std::string& alias);
+    const std::string& alias() const { return alias_; }
+    std::string qualify(const std::string& name) const;
+    std::string bare(const std::string& published) const;
+
     void add(Tool tool);
-    bool has(const std::string& name) const;
-    const Tool* find(const std::string& name) const;
-    std::vector<std::string> names() const;
+    bool has(const std::string& published) const;
+    const Tool* find(const std::string& published) const;
+    std::vector<std::string> names() const; // published names, sorted
     std::size_t size() const;
     Json list() const; // {"tools": [...]}
 
 private:
+    bool carriesAlias(const std::string& published) const;
+
     std::map<std::string, Tool> tools_;
+    std::string alias_;
 };
 
 void registerCoreTools(ToolRegistry& registry);

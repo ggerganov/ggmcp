@@ -104,16 +104,42 @@ Json ToolResult::toJson() const {
     return result;
 }
 
+void ToolRegistry::setAlias(const std::string& alias) {
+    alias_ = alias;
+}
+
+std::string ToolRegistry::qualify(const std::string& name) const {
+    return alias_.empty() ? name : alias_ + "-" + name;
+}
+
+bool ToolRegistry::carriesAlias(const std::string& published) const {
+    if (alias_.empty()) {
+        return true;
+    }
+    const std::string prefix = alias_ + "-";
+    return published.size() > prefix.size() && published.compare(0, prefix.size(), prefix) == 0;
+}
+
+std::string ToolRegistry::bare(const std::string& published) const {
+    if (alias_.empty() || !carriesAlias(published)) {
+        return published;
+    }
+    return published.substr(alias_.size() + 1);
+}
+
 void ToolRegistry::add(Tool tool) {
     tools_.emplace(tool.name, std::move(tool));
 }
 
-bool ToolRegistry::has(const std::string& name) const {
-    return tools_.find(name) != tools_.end();
+bool ToolRegistry::has(const std::string& published) const {
+    return find(published) != nullptr;
 }
 
-const Tool* ToolRegistry::find(const std::string& name) const {
-    auto it = tools_.find(name);
+const Tool* ToolRegistry::find(const std::string& published) const {
+    if (!carriesAlias(published)) {
+        return nullptr;
+    }
+    auto it = tools_.find(bare(published));
     return it == tools_.end() ? nullptr : &it->second;
 }
 
@@ -121,7 +147,7 @@ std::vector<std::string> ToolRegistry::names() const {
     std::vector<std::string> names;
     names.reserve(tools_.size());
     for (const auto& entry : tools_) {
-        names.push_back(entry.first);
+        names.push_back(qualify(entry.first));
     }
     std::sort(names.begin(), names.end());
     return names;
@@ -135,7 +161,7 @@ Json ToolRegistry::list() const {
     Json tools = Json::array();
     for (const auto& entry : tools_) {
         Json tool = Json::object();
-        tool.set("name", entry.second.name);
+        tool.set("name", qualify(entry.second.name));
         if (!entry.second.title.empty()) {
             tool.set("title", entry.second.title);
         }
