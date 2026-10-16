@@ -88,6 +88,9 @@ On by default, disabled with `--no-bash`:
 
 ## Implementation details
 
+- CMake (3.16 or newer) is the build system, and the sources are C++17:
+  `cmake -S . -B build`, `cmake --build build`, `ctest --test-dir build`
+- Both backends are vendored as headers under `vendor/`, so a build needs no network
 - The default JSON backend sits behind an interface, so no backend type reaches
   the rest of the server and it can be swapped without touching anything above it
 - The default HTTP backend is wrapped the same way: the server speaks its own
