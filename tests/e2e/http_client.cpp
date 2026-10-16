@@ -283,6 +283,19 @@ Reply HttpClient::call(const std::string& method, const std::string& target,
     return reply;
 }
 
+Reply send(int port, const std::string& method, const std::string& target,
+           const std::string& body, const RequestOptions& options) {
+    HttpClient client;
+    std::string error;
+    if (!client.open("127.0.0.1", port, error)) {
+        expect(__FILE__, __LINE__, "connect", false, error);
+        Reply reply;
+        reply.body = error;
+        return reply;
+    }
+    return client.call(method, target, body, options);
+}
+
 std::string withSession(const std::string& sessionId) {
     return std::string("Mcp-Session-Id: ") + sessionId;
 }

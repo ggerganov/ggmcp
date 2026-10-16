@@ -47,6 +47,7 @@ struct Options {
     int bashTimeoutSeconds = 30;
 
     bool strictOrigin = false;
+    bool cors = true;
     std::vector<std::string> allowedOrigins;
 
     bool requireToken = false;

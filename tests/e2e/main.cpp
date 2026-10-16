@@ -648,6 +648,140 @@ void testOriginPolicies() {
     }
 }
 
+// --------------------------------------------------------------------- CORS
+
+void testCorsFromABrowser() {
+    const std::string root = ggt::tempRoot("cors");
+    const std::string origin = "http://100.111.34.101:8033";
+    const std::vector<std::string> preflightHeaders = {
+        "Origin: " + origin,
+        "Access-Control-Request-Method: POST",
+        "Access-Control-Request-Headers: content-type, authorization",
+    };
+
+    {
+        ggt::Server server({"--fs-root", root});
+
+        const Reply preflight = ggt::send(server.port(), "OPTIONS", "/mcp", {},
+                                          headers(preflightHeaders));
+        EXPECT(preflight.status == 204, preflight.body);
+        EXPECT(preflight.header("Access-Control-Allow-Origin") == origin, preflight.body);
+        EXPECT(preflight.header("Access-Control-Allow-Methods").find("POST") !=
+                   std::string::npos,
+               preflight.header("Access-Control-Allow-Methods"));
+        EXPECT(preflight.header("Access-Control-Allow-Headers") ==
+                   "content-type, authorization",
+               preflight.header("Access-Control-Allow-Headers"));
+        EXPECT(!preflight.header("Access-Control-Max-Age").empty(),
+               preflight.header("Access-Control-Max-Age"));
+        EXPECT(preflight.header("Vary").find("Origin") != std::string::npos,
+               preflight.header("Vary"));
+
+        const Reply open = ggt::send(server.port(), "OPTIONS", "/mcp", {},
+                                     headers({"Origin: " + origin}));
+        EXPECT(open.status == 204, open.body);
+        EXPECT(!open.header("Access-Control-Allow-Headers").empty(),
+               open.header("Access-Control-Allow-Headers"));
+
+        const Reply init = ggt::postJson(
+            server.port(), request("1", "initialize",
+                                   R"({"protocolVersion":"2025-06-18","clientInfo":{"name":"web"}})"),
+            headers({"Origin: " + origin}));
+        EXPECT(init.status == 200, init.body);
+        EXPECT(init.header("Access-Control-Allow-Origin") == origin,
+               init.header("Access-Control-Allow-Origin"));
+        EXPECT(init.header("Access-Control-Expose-Headers").find("Mcp-Session-Id") !=
+                   std::string::npos,
+               init.header("Access-Control-Expose-Headers"));
+        EXPECT(!init.header("Mcp-Session-Id").empty(), "a browser can read the session id");
+
+        const Reply health = ggt::send(server.port(), "GET", "/health", {},
+                                       headers({"Origin: " + origin}));
+        EXPECT(health.header("Access-Control-Allow-Origin") == origin, health.body);
+
+        const Reply index = ggt::send(server.port(), "GET", "/", {},
+                                      headers({"Origin: " + origin}));
+        EXPECT(index.header("Access-Control-Allow-Origin") == origin, index.body);
+
+        const Reply anonymous = ggt::postJson(server.port(), request("2", "ping"));
+        EXPECT(anonymous.header("Access-Control-Allow-Origin").empty(),
+               "a request with no Origin gets no CORS headers");
+    }
+
+    {
+        ggt::Server strict({"--fs-root", root, "--strict-origin"});
+        const Reply preflight = ggt::send(strict.port(), "OPTIONS", "/mcp", {},
+                                          headers(preflightHeaders));
+        EXPECT(preflight.status == 403, preflight.body);
+        EXPECT(preflight.header("Access-Control-Allow-Origin").empty(), preflight.body);
+
+        const Reply posted = ggt::postJson(strict.port(), request("1", "ping"),
+                                           headers({"Origin: " + origin}));
+        EXPECT(posted.status == 403, posted.body);
+
+        const Reply own = ggt::send(strict.port(), "OPTIONS", "/mcp", {},
+                                    headers({"Origin: http://127.0.0.1:" +
+                                             std::to_string(strict.port())}));
+        EXPECT(own.status == 204, own.body);
+        EXPECT(!own.header("Access-Control-Allow-Origin").empty(), own.body);
+    }
+
+    {
+        ggt::Server named({"--fs-root", root, "--allow-origin", "http://good.example",
+                           "--allow-origin", "*"});
+        const Reply good = ggt::send(named.port(), "OPTIONS", "/mcp", {},
+                                     headers({"Origin: http://good.example"}));
+        EXPECT(good.status == 204, good.body);
+        EXPECT(good.header("Access-Control-Allow-Origin") == "http://good.example", good.body);
+    }
+
+    {
+        ggt::Server quiet({"--fs-root", root, "--strict-origin", "--allow-origin",
+                           "http://good.example"});
+        const Reply bad = ggt::send(quiet.port(), "OPTIONS", "/mcp", {},
+                                    headers({"Origin: http://bad.example"}));
+        EXPECT(bad.status == 403, bad.body);
+    }
+
+    {
+        ggt::Server noCors({"--fs-root", root, "--no-cors"});
+        const Reply preflight = ggt::send(noCors.port(), "OPTIONS", "/mcp", {},
+                                          headers(preflightHeaders));
+        EXPECT(preflight.status == 405, preflight.body);
+        EXPECT(preflight.header("Access-Control-Allow-Origin").empty(), preflight.body);
+        const Reply posted = ggt::postJson(noCors.port(), request("1", "ping"),
+                                           headers({"Origin: " + origin}));
+        EXPECT(posted.status == 200, posted.body);
+        EXPECT(posted.header("Access-Control-Allow-Origin").empty(),
+               posted.header("Access-Control-Allow-Origin"));
+    }
+
+    {
+        ggt::Server guarded({"--fs-root", root, "--require-token", "--token-env", "GGMCP_TOKEN"},
+                            {"GGMCP_TOKEN=cors-token"});
+        const Reply denied = ggt::postJson(guarded.port(), request("1", "ping"),
+                                          headers({"Origin: " + origin}));
+        EXPECT(denied.status == 401, denied.body);
+        EXPECT(denied.header("Access-Control-Allow-Origin") == origin,
+               "a browser can read the 401 body");
+
+        const Reply accepted = ggt::postJson(
+            guarded.port(), request("2", "ping"),
+            headers({"Origin: " + origin, "Authorization: Bearer cors-token"}));
+        EXPECT(accepted.status == 200, accepted.body);
+        EXPECT(accepted.header("Access-Control-Allow-Origin") == origin, accepted.body);
+
+        const Reply metadata = ggt::send(guarded.port(), "GET",
+                                         "/.well-known/oauth-protected-resource", {},
+                                         headers({"Origin: " + origin}));
+        EXPECT(metadata.status == 200, metadata.body);
+        EXPECT(metadata.header("Access-Control-Allow-Origin") == origin, metadata.body);
+    }
+
+    const ggt::Process help = ggt::runBinary({"--help"});
+    EXPECT(help.output.find("--no-cors") != std::string::npos, help.output);
+}
+
 // ---------------------------------------------------------------- authorization
 
 void testBearerTokens() {
@@ -880,6 +1014,7 @@ int main(int argc, char** argv) {
             {"bash tool", testBashTool},
             {"--allow-outside-root", testOutsideRoot},
             {"origin policies", testOriginPolicies},
+            {"cors from a browser", testCorsFromABrowser},
             {"bearer tokens", testBearerTokens},
             {"bearer token from the environment", testTokenFromEnvironment},
             {"command line flag validation", testCommandLineValidation},

@@ -93,6 +93,8 @@ std::string usageText() {
            "              [--no-file-tools] [--no-bash] [--bash-timeout N] [--strict-origin] "
            "[--allow-origin ORIGIN]\n"
            "              [--require-token] [--token-env NAME | --token-file PATH | --token-stdin]\n"
+           "              [--strict-origin] [--allow-origin ORIGIN] [--no-cors] "
+           "[--bash-timeout N]\n"
            "              [--name NAME] [--title TITLE] [--instructions TEXT] "
            "[--json-backend NAME] [--http-backend NAME]\n"
            "              [--quiet] [--verbose]";
@@ -116,7 +118,8 @@ std::string helpText() {
         << "  --bash-timeout N            bash timeout in seconds, default 30\n"
         << "\nOrigins\n"
         << "  --strict-origin             require the Origin header to match the Host or --allow-origin\n"
-        << "  --allow-origin ORIGIN       allow an extra origin, repeatable\n"
+        << "  --allow-origin ORIGIN       allow an extra origin, repeatable, '*' means any\n"
+        << "  --no-cors                   never send CORS headers, for non browser clients\n"
         << "\nAuthorization\n"
         << "  --require-token             require 'Authorization: Bearer <token>'\n"
         << "  --token-env NAME            read the token from NAME, default $GGMCP_TOKEN\n"
@@ -167,6 +170,8 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error,
             options.bashTool = false;
         } else if (flag == "--strict-origin") {
             options.strictOrigin = true;
+        } else if (flag == "--no-cors") {
+            options.cors = false;
         } else if (flag == "--require-token") {
             options.requireToken = true;
         } else if (flag == "--token-stdin") {
@@ -259,8 +264,8 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error,
             if (!needValue(flag, index, argc, argv, value)) {
                 return false;
             }
-            if (!looksLikeOrigin(value)) {
-                error = "--allow-origin needs a scheme, got '" + value + "'";
+            if (value != "*" && !looksLikeOrigin(value)) {
+                error = "--allow-origin needs a scheme or '*', got '" + value + "'";
                 return false;
             }
             options.allowedOrigins.push_back(value);

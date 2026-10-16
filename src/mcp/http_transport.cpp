@@ -46,11 +46,58 @@ bool originAllowed(const http::Request& request, const Options& options) {
         return true;
     }
     for (const auto& allowed : options.allowedOrigins) {
-        if (allowed == origin) {
+        if (allowed == origin || allowed == "*") {
             return true;
         }
     }
     return false;
+}
+
+// CORS: a browser only reads the reply when the headers say so, and it sends an
+// OPTIONS preflight first. The origin is echoed rather than '*' so that clients
+// sending credentials keep working.
+constexpr const char* kAllowedMethods = "POST, DELETE, OPTIONS";
+constexpr const char* kExposeHeaders = "Mcp-Session-Id, MCP-Protocol-Version";
+constexpr const char* kDefaultAllowHeaders =
+    "Authorization, Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID";
+
+void applyCors(const http::Request& request, const Options& options, http::Response& response) {
+    if (!options.cors) {
+        return;
+    }
+    const std::string origin = request.header("Origin");
+    if (origin.empty() || !originAllowed(request, options)) {
+        return;
+    }
+    response.setHeader("Access-Control-Allow-Origin", origin);
+    response.setHeader("Vary", "Origin");
+    response.setHeader("Access-Control-Expose-Headers", kExposeHeaders);
+}
+
+const char* const kCorsDenied = "the Origin header is not allowed, use --allow-origin to allow it";
+
+http::Response preflight(const http::Request& request, const Options& options) {
+    if (!options.cors) {
+        return http::Router::errorBody(405, "this server does not answer CORS preflights");
+    }
+    if (!originAllowed(request, options)) {
+        return http::Router::errorBody(403, kCorsDenied);
+    }
+    http::Response response = http::Response::empty(204);
+    response.setHeader("Access-Control-Allow-Origin", request.header("Origin"));
+    response.setHeader("Vary", "Origin");
+    response.setHeader("Access-Control-Allow-Methods", kAllowedMethods);
+    const std::string requested = request.header("Access-Control-Request-Headers");
+    response.setHeader("Access-Control-Allow-Headers",
+                       requested.empty() ? kDefaultAllowHeaders : requested);
+    response.setHeader("Access-Control-Max-Age", "600");
+    return response;
+}
+
+http::Response finish(const http::Request& request, const Options& options,
+                      http::Response response) {
+    applyCors(request, options, response);
+    return response;
 }
 
 http::Response fromOutbound(const Outbound& outbound) {
@@ -112,15 +159,14 @@ std::shared_ptr<http::Router> makeRouter(const Options& options, Protocol& proto
 
     router->add("POST", endpoint, [&protocol, &authorizer, settings](const http::Request& request) {
         if (!originAllowed(request, settings)) {
-            return http::Router::errorBody(
-                403, "the Origin header is not allowed, use --allow-origin to allow it");
+            return finish(request, settings, http::Router::errorBody(403, kCorsDenied));
         }
         const auto decision = authorizer.authorize(request);
         if (!decision.allowed) {
             http::Response response =
                 http::Response::json(401, authorizer.resourceMetadata(request));
             response.setHeader("WWW-Authenticate", decision.wwwAuthenticate);
-            return response;
+            return finish(request, settings, std::move(response));
         }
 
         Inbound inbound;
@@ -134,36 +180,38 @@ std::shared_ptr<http::Router> makeRouter(const Options& options, Protocol& proto
         inbound.clientAddress = request.remoteAddress;
         inbound.protocolVersionHeader = request.header(protocol::kProtocolVersionHeader);
 
-        return fromOutbound(protocol.handle(inbound));
+        return finish(request, settings, fromOutbound(protocol.handle(inbound)));
     });
 
     router->add("DELETE", endpoint,
                 [&protocol, &authorizer, settings](const http::Request& request) {
                     if (!originAllowed(request, settings)) {
-                        return http::Router::errorBody(
-                            403, "the Origin header is not allowed, use --allow-origin to allow it");
+                        return finish(request, settings,
+                                      http::Router::errorBody(403, kCorsDenied));
                     }
                     const auto decision = authorizer.authorize(request);
                     if (!decision.allowed) {
                         http::Response response =
                             http::Response::json(401, authorizer.resourceMetadata(request));
                         response.setHeader("WWW-Authenticate", decision.wwwAuthenticate);
-                        return response;
+                        return finish(request, settings, std::move(response));
                     }
                     const std::string sessionId = request.header(protocol::kSessionIdHeader);
                     const int status = protocol.destroy(sessionId);
                     if (status == 200) {
-                        return http::Response::json(
-                            200, Json::object({{"message", "session closed"},
-                                               {"session", sessionId}}));
+                        return finish(
+                            request, settings,
+                            http::Response::json(200, Json::object({{"message", "session closed"},
+                                                                    {"session", sessionId}})));
                     }
                     std::string code = status == 404 ? "session_not_found" : "bad_request";
                     if (settings.sessionPolicy == SessionPolicy::Stateless) {
                         code = "stateless";
                     }
-                    return http::Response::json(status,
-                                                protocol::transportFault(code,
-                                                                         "no session to close"));
+                    return finish(request, settings,
+                                  http::Response::json(
+                                      status,
+                                      protocol::transportFault(code, "no session to close")));
                 });
 
     router->add("GET", healthPath,
@@ -173,7 +221,7 @@ std::shared_ptr<http::Router> makeRouter(const Options& options, Protocol& proto
                         http::Response response =
                             http::Response::json(401, authorizer.resourceMetadata(request));
                         response.setHeader("WWW-Authenticate", decision.wwwAuthenticate);
-                        return response;
+                        return finish(request, settings, std::move(response));
                     }
                     Json health = Json::object({{"status", "ok"},
                                                 {"version", settings.serverVersion},
@@ -184,12 +232,14 @@ std::shared_ptr<http::Router> makeRouter(const Options& options, Protocol& proto
                                                 {"policy", toString(settings.sessionPolicy)},
                                                 {"root", settings.root()},
                                                 {"token", authorizer.sourceDescription()},
-                                                {"tools", toolNames}});
-                    return http::Response::json(200, health);
+                                                {"tools", toolNames},
+                                                {"cors", settings.cors}});
+                    return finish(request, settings, http::Response::json(200, health));
                 });
 
-    router->add("GET", metadataPath, [&authorizer](const http::Request& request) {
-        return http::Response::json(200, authorizer.resourceMetadata(request));
+    router->add("GET", metadataPath, [&authorizer, settings](const http::Request& request) {
+        return finish(request, settings,
+                      http::Response::json(200, authorizer.resourceMetadata(request)));
     });
 
     router->add("GET", indexPath,
@@ -199,7 +249,7 @@ std::shared_ptr<http::Router> makeRouter(const Options& options, Protocol& proto
                         http::Response response =
                             http::Response::json(401, authorizer.resourceMetadata(request));
                         response.setHeader("WWW-Authenticate", decision.wwwAuthenticate);
-                        return response;
+                        return finish(request, settings, std::move(response));
                     }
                     std::ostringstream html;
                     html << "<!doctype html><html><head><meta charset=\"utf-8\"><title>"
@@ -222,8 +272,16 @@ std::shared_ptr<http::Router> makeRouter(const Options& options, Protocol& proto
                     http::Response response = http::Response::empty(200);
                     response.body = html.str();
                     response.setHeader("Content-Type", "text/html; charset=utf-8");
-                    return response;
+                    return finish(request, settings, std::move(response));
                 });
+
+    const auto preflightHandler = [settings](const http::Request& request) {
+        return preflight(request, settings);
+    };
+    router->add("OPTIONS", endpoint, preflightHandler);
+    router->add("OPTIONS", healthPath, preflightHandler);
+    router->add("OPTIONS", indexPath, preflightHandler);
+    router->add("OPTIONS", metadataPath, preflightHandler);
 
     return router;
 }

@@ -74,6 +74,10 @@ Reply postJson(int port, const std::string& body, const RequestOptions& options 
 Reply get(int port, const std::string& target, const RequestOptions& options = {});
 Reply remove(int port, const std::string& target, const RequestOptions& options = {});
 
+// Any verb, fresh connection.
+Reply send(int port, const std::string& method, const std::string& target,
+           const std::string& body = {}, const RequestOptions& options = {});
+
 std::string withSession(const std::string& sessionId);
 
 } // namespace ggt

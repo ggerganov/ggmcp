@@ -40,7 +40,8 @@ headers under `vendor/`, so no download or package manager is needed.
 | `--no-bash` | off | do not offer `bash` |
 | `--bash-timeout N` | `30` | bash timeout in seconds |
 | `--strict-origin` | off | require `Origin` to match `Host` or `--allow-origin` |
-| `--allow-origin ORIGIN` | none | allow an extra origin, repeatable |
+| `--allow-origin ORIGIN` | none | allow an extra origin, repeatable, `*` means any |
+| `--no-cors` | off | never send CORS headers, for non browser clients |
 | `--require-token` | off | require `Authorization: Bearer <token>` |
 | `--token-env NAME` | `$GGMCP_TOKEN` | read the token from an environment variable |
 | `--token-file PATH` | none | read the token from a file, re-read when it changes |
@@ -50,6 +51,28 @@ headers under `vendor/`, so no download or package manager is needed.
 | `--quiet`, `--verbose` | stderr log | silence or raise the log level |
 
 No flag takes a token value: tokens come from the environment, a file or stdin.
+
+### From a browser
+
+CORS is on by default and any origin is allowed, so a web client can POST to the
+endpoint without extra flags:
+
+```sh
+./build/ggmcp --host 0.0.0.0 --port 8081 --fs-root ~/scratch
+```
+
+The server answers the `OPTIONS` preflight with `204` plus
+`Access-Control-Allow-Origin` (the requesting origin, echoed), `...-Allow-Methods:
+POST, DELETE, OPTIONS`, `...-Allow-Headers` (the requested headers, or a sensible
+default) and `...-Max-Age: 600`, and puts `Access-Control-Allow-Origin` and
+`Access-Control-Expose-Headers: Mcp-Session-Id, MCP-Protocol-Version` on every
+response &mdash; including `401`s, so a browser can read the challenge. The browser needs
+the session id header, which is why it is exposed.
+
+To tighten it: `--strict-origin` restricts both the check and the CORS headers to
+the `Host` origin and the `--allow-origin` list, `--allow-origin http://host:port`
+adds one more, `--allow-origin '*'` names the wildcard explicitly, and `--no-cors`
+switches the headers off entirely (a browser can then no longer connect).
 
 ## Layout
 
