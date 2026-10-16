@@ -9,6 +9,7 @@ A Model Context Protocol server in C++17, served over streamable HTTP.
 - JSON and HTTP each come from a replaceable backend behind an interface
 - No TLS in the server itself
 - Two transports: streamable HTTP (default) and stdio
+- Browser agents are served over CORS, any origin allowed by default
 
 ## Transports
 
@@ -16,6 +17,8 @@ A Model Context Protocol server in C++17, served over streamable HTTP.
 - Session policy: `lenient` (default), `strict`, `stateless`
 - stdio: no session handling, one message per line
 - Notifications answer `202` with an empty body; `GET /mcp` answers `405`
+- `OPTIONS` on a known path answers `204` as a CORS preflight, or `405` under `--no-cors`;
+  any other verb on a known path answers `405`
 - JSON-RPC errors go out at HTTP `200`; non-2xx is reserved for transport faults
 
 ## Methods
@@ -61,10 +64,26 @@ On by default, disabled with `--no-bash`:
 - Missing or unusable token: `401` + `WWW-Authenticate` + RFC 9728 resource metadata
 - Token in the query string is refused even when correct
 
+## Browser clients
+
+- CORS is on by default and any origin is allowed, so a web agent connects with no flags
+- The preflight answers `204` with the allowed methods, the requested headers (or a
+  default list) and `Access-Control-Max-Age`
+- A response echoes the requesting origin in `Access-Control-Allow-Origin` and adds
+  `Vary: Origin`; the origin is echoed rather than `*`
+- `Access-Control-Expose-Headers` names `Mcp-Session-Id` and `MCP-Protocol-Version` —
+  without them a browser cannot read the session id it was issued
+- The preflight is never authorized: it carries no token by definition
+- `401` carries the CORS headers too, so a browser can read the challenge
+- `--no-cors` stops sending the headers and turns the preflight back into a `405`, for
+  clients that are not browsers
+
 ## Defaults
 
 - Binds `0.0.0.0:8081`, endpoint `/mcp`, any `Origin` accepted
-- `--strict-origin` restores the DNS-rebinding check; `--allow-origin` names origins
+- `--strict-origin` restores the DNS-rebinding check; `--allow-origin` names origins,
+  `*` stands for any
+- A refused origin is a `403` with no CORS headers, so the browser sees nothing
 - `GET /health` and a `GET /` index page; both behind the token when auth is on
 
 ## Implementation details
@@ -96,5 +115,6 @@ The server is started as a real process and driven over the wire.
 - File and shell tools against a temporary root
 - Tools offered by default and under `--no-file-tools --no-bash`
 - Origin policies, including `--strict-origin`
+- CORS preflight and headers, the `401` path and `--no-cors`
 - Bearer tokens, including the `401` path
 - The stdio transport
