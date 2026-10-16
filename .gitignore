@@ -1,0 +1,7 @@
+/tmp/
+/build/
+/build-*/
+/compile_commands.json
+.cache/
+*.o
+*.log
