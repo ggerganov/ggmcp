@@ -183,28 +183,45 @@ without a string `name`, or an unknown name, is `-32602` and lists what is avail
 
 ## End-to-end tests
 
-The server is started as a real process and driven over the wire.
+The server is started as a real process and driven over the wire. Every case is its own
+`ctest` entry, and `e2e_all` runs the whole set again in one process.
 
-- `GET /health` and the index page
-- Requests made before the handshake
+- `GET /health` and the index page, and what the index page advertises
 - `initialize` and the session id it issues, and a second `initialize` on a live session
+- Requests made before the handshake: lenient serves them, strict answers `400
+  session_not_initialized` until `notifications/initialized` arrives
 - `serverInfo`, its title and the handshake instructions, with and without the flags
-- `tools/list` and `tools/call`
-- `ping`, unknown methods, a batched array and a broken body
-- Keep-alive and chunked bodies
-- Session teardown with `DELETE`
-- Session policies: lenient, strict, stateless
-- Command-line flag validation
-- A second instance on a serving port, which must fail to bind
+- The negotiated version echoed back, and an `MCP-Protocol-Version` this server does not
+  speak
+- `tools/list` and `tools/call`, the two agreeing on every name, and the schema each tool
+  publishes
+- `ping`, unknown methods, a batched array, a broken body, and `resources/list` and
+  `prompts/list` answering empty
+- A tool that fails, which is `isError` and not a protocol error
+- The transport codes: `202`, `405`, `406`, `413`, `415`, and a path that is not there
+- Session teardown with `DELETE`: closed, an id this server did not issue, and no id
+- Session policies: lenient, strict, stateless, and stdio ignoring the policy
+- Keep-alive across requests, and a body arriving in several chunks. Pipelining is not
+  covered: the HTTP library answers only the first of two requests written before either
+  answer is read
 - The three error shapes: a JSON-RPC object at `200`, a string fault, a numeric one
-- A non-default `--endpoint`, including what the index page advertises
+- A non-default `--endpoint`
+- Command-line flag validation, `--help`, `--version`, and a bad flag leaving exit `2`
+- The start-up banner, and `--quiet` holding it back
+- A second instance on a serving port, which must fail to bind, and a restart over a
+  socket left in `TIME_WAIT`, which must work
+- `SIGINT` and `SIGTERM` on both transports, and a client that hangs up mid-request
 - File and shell tools against a temporary root
-- Writes that fail: the root gains no stray file, the target is untouched, no
-  directory is made under a file
+- Confinement: a symlink that leaves the root, `~` taken as a directory, a root outside
+  the tree taken as given, and bytes that are not UTF-8
+- Writes that fail: the root gains no stray file, the target is untouched, no directory
+  is made under a file
 - Tools offered by default and under `--no-file-tools --no-bash`
 - Tool name alias: default `mcp`, `--alias`, empty alias, unknown bare name
-- Origin policies, including `--strict-origin`
+- Origin policies, `--strict-origin`, and a refused origin carrying no CORS headers
 - CORS preflight and headers, the `401` path and `--no-cors`
-- Bearer tokens, including the `401` challenge, a token in the query string and
-  rotation of a token file without a restart
-- The stdio transport
+- Bearer tokens: `$GGMCP_TOKEN` by default, the `401` challenge, the metadata document
+  left public, a token in the query string, rotation of a token file without a restart,
+  and an unusable source at start up
+- The stdio transport: one message per line, a notification answered with nothing, and
+  the session policy ignored
