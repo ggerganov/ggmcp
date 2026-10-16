@@ -1,0 +1,1 @@
+Implement this project so that README.md and docs/spec.md are satisfied.
